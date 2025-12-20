@@ -1,0 +1,96 @@
+name: 'Security Scanner Action'
+description: 'GitHub Advanced Security 기능을 오픈소스로 구현한 통합 보안 스캐너'
+author: 'Security Action Team'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  secret-scan:
+    description: '비밀값 노출 스캔 활성화 (Gitleaks)'
+    required: false
+    default: 'true'
+  code-scan:
+    description: '코드 취약점 스캔 활성화 (Semgrep)'
+    required: false
+    default: 'true'
+  dependency-scan:
+    description: '의존성 취약점 스캔 활성화 (Trivy)'
+    required: false
+    default: 'true'
+  sonar-scan:
+    description: 'SonarQube 코드 품질 스캔 활성화'
+    required: false
+    default: 'false'
+  sonar-host-url:
+    description: 'SonarQube 서버 URL'
+    required: false
+    default: 'http://localhost:9000'
+  sonar-token:
+    description: 'SonarQube 인증 토큰'
+    required: false
+  sonar-project-key:
+    description: 'SonarQube 프로젝트 키'
+    required: false
+  ai-review:
+    description: 'AI 기반 코드 리뷰 활성화 (LangGraph)'
+    required: false
+    default: 'false'
+  severity-threshold:
+    description: '실패 기준 심각도 (critical, high, medium, low)'
+    required: false
+    default: 'high'
+  openai-api-key:
+    description: 'OpenAI API 키 (AI 리뷰 사용 시 필수)'
+    required: false
+  anthropic-api-key:
+    description: 'Anthropic API 키 (AI 리뷰 사용 시 대안)'
+    required: false
+  github-token:
+    description: 'GitHub 토큰 (PR 코멘트용)'
+    required: false
+    default: ${{ github.token }}
+  config-path:
+    description: '커스텀 설정 파일 경로'
+    required: false
+  fail-on-findings:
+    description: '취약점 발견 시 워크플로우 실패 처리'
+    required: false
+    default: 'true'
+  sarif-output:
+    description: 'SARIF 포맷 결과 파일 경로'
+    required: false
+    default: 'security-results.sarif'
+
+outputs:
+  scan-results:
+    description: '스캔 결과 JSON'
+  findings-count:
+    description: '발견된 취약점 총 개수'
+  critical-count:
+    description: 'Critical 심각도 취약점 개수'
+  high-count:
+    description: 'High 심각도 취약점 개수'
+  sarif-file:
+    description: 'SARIF 결과 파일 경로'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    INPUT_SECRET_SCAN: ${{ inputs.secret-scan }}
+    INPUT_CODE_SCAN: ${{ inputs.code-scan }}
+    INPUT_DEPENDENCY_SCAN: ${{ inputs.dependency-scan }}
+    INPUT_SONAR_SCAN: ${{ inputs.sonar-scan }}
+    INPUT_AI_REVIEW: ${{ inputs.ai-review }}
+    INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+    INPUT_OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+    INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+    INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+    INPUT_CONFIG_PATH: ${{ inputs.config-path }}
+    INPUT_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+    INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+    SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+    SONAR_TOKEN: ${{ inputs.sonar-token }}
+    SONAR_PROJECT_KEY: ${{ inputs.sonar-project-key }}

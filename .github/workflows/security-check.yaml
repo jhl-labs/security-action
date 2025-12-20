@@ -1,0 +1,104 @@
+name: Security Self-Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 매주 월요일 오전 9시 (KST) = 일요일 자정 (UTC)
+    - cron: '0 0 * * 0'
+  workflow_dispatch:  # 수동 실행 허용
+
+jobs:
+  security-scan:
+    name: Security Scan
+    runs-on: jhl-space
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 전체 히스토리 (secret scanning에 필요)
+
+      - name: Run Security Scan (Self-Check)
+        id: security
+        uses: ./  # 자기 자신을 사용
+        with:
+          secret-scan: 'true'
+          code-scan: 'true'
+          dependency-scan: 'true'
+          sonar-scan: 'false'
+          ai-review: 'false'
+          severity-threshold: 'high'
+          fail-on-findings: 'false'  # 테스트 픽스처 때문에 일단 비활성화
+          sarif-output: 'security-results.sarif'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        continue-on-error: true  # private repo에서는 실패할 수 있음
+        with:
+          sarif_file: security-results.sarif
+
+      - name: Security Scan Summary
+        if: always()
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Findings | ${{ steps.security.outputs.findings-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Critical | ${{ steps.security.outputs.critical-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| High | ${{ steps.security.outputs.high-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.security.outputs.findings-count }}" != "0" ]; then
+            echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
+            echo "> Security issues were found. Please review the findings." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "> [!NOTE]" >> $GITHUB_STEP_SUMMARY
+            echo "> No security issues found." >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Docker 이미지 빌드 테스트
+  build-test:
+    name: Build Test
+    runs-on: jhl-space
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: security-action:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Python 린팅 (Docker로 실행)
+  lint:
+    name: Lint & Type Check
+    runs-on: jhl-space
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Ruff in Docker
+        run: |
+          docker run --rm -v $(pwd):/app -w /app python:3.11-slim sh -c "
+            pip install -q ruff mypy pydantic pydantic-settings httpx PyYAML 'rich>=13.5.0,<14.0.0' &&
+            echo '=== Ruff Lint ===' &&
+            ruff check src/ &&
+            echo '=== Ruff Format ===' &&
+            ruff format --check src/
+          "
