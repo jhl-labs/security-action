@@ -62,5 +62,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY config/ ./config/
 
+# Wrapper 스크립트 복사
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 # 엔트리포인트 설정
-ENTRYPOINT ["python", "/action/src/main.py"]
+ENTRYPOINT ["/entrypoint.sh"]
