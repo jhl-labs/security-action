@@ -916,10 +916,10 @@ def main() -> int:
         for r in results:
             scan_summary.append(
                 {
-                    "scanner": r.get("scanner", "Unknown"),
-                    "success": r.get("success", False),
-                    "findings_count": len(r.get("findings", [])),
-                    "time": f"{r.get('execution_time', 0):.2f}s",
+                    "scanner": r.scanner,
+                    "success": r.success,
+                    "findings_count": len(r.findings),
+                    "time": f"{r.execution_time:.2f}s",
                 }
             )
 

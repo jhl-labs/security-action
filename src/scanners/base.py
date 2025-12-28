@@ -95,12 +95,25 @@ class BaseScanner(ABC):
         )
 
     def run_command(
-        self, cmd: list[str], capture_output: bool = True
+        self,
+        cmd: list[str],
+        capture_output: bool = True,
+        timeout: int | None = None,
     ) -> subprocess.CompletedProcess:
-        """명령어 실행"""
+        """명령어 실행
+
+        Args:
+            cmd: 실행할 명령어 리스트
+            capture_output: 출력 캡처 여부
+            timeout: 타임아웃 (초)
+
+        Returns:
+            subprocess.CompletedProcess
+        """
         return subprocess.run(
             cmd,
             cwd=self.workspace,
             capture_output=capture_output,
             text=True,
+            timeout=timeout,
         )
