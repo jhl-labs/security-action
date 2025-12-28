@@ -113,9 +113,12 @@ class IaCScanner(BaseScanner):
         try:
             cmd = [
                 "checkov",
-                "--directory", self.workspace,
-                "--output", "json",
-                "--output-file-path", report_path,
+                "--directory",
+                self.workspace,
+                "--output",
+                "json",
+                "--output-file-path",
+                report_path,
                 "--compact",
                 "--quiet",
             ]
@@ -203,7 +206,11 @@ class IaCScanner(BaseScanner):
         # 라인 정보
         file_line_range = check.get("file_line_range", [1, 1])
         line_start = file_line_range[0] if isinstance(file_line_range, list) else 1
-        line_end = file_line_range[1] if isinstance(file_line_range, list) and len(file_line_range) > 1 else None
+        line_end = (
+            file_line_range[1]
+            if isinstance(file_line_range, list) and len(file_line_range) > 1
+            else None
+        )
 
         guideline = check.get("guideline", "")
         suggestion = guideline if guideline else check.get("check_name", "")

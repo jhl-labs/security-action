@@ -1,8 +1,7 @@
 """GitHub 리포터 - PR 코멘트 및 Check Run"""
 
 import os
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from github import Github
 from github.CheckRun import CheckRun
@@ -427,21 +426,13 @@ class GitHubReporter:
 
         # 컨텍스트가 없으면 새로 생성
         if not context:
-            return self._create_completed_scanner_check(
-                scanner, findings, execution_time, error
-            )
-
-        scanner_info = self.SCANNER_INFO.get(scanner, {})
-        icon = scanner_info.get("icon", "🔍")
-        name = scanner_info.get("name", scanner)
+            return self._create_completed_scanner_check(scanner, findings, execution_time, error)
 
         # 결론 결정
         conclusion, title = self._determine_conclusion(findings, error)
 
         # 마크다운 summary 생성
-        summary = self._generate_scanner_summary(
-            scanner, findings, execution_time, error
-        )
+        summary = self._generate_scanner_summary(scanner, findings, execution_time, error)
 
         # 어노테이션 생성 (50개 이상 처리)
         all_annotations = self._create_annotations(findings)
@@ -694,9 +685,7 @@ class GitHubReporter:
         """취약점 목록에서 어노테이션 목록 생성"""
         annotations = []
         for finding in findings:
-            annotation_level = self._severity_to_annotation_level(
-                finding.get("severity", "medium")
-            )
+            annotation_level = self._severity_to_annotation_level(finding.get("severity", "medium"))
             annotations.append(
                 {
                     "path": finding.get("file_path", ""),
@@ -763,9 +752,7 @@ class GitHubReporter:
         conclusion, title = self._determine_conclusion(all_findings, None)
 
         # 통합 summary 생성
-        summary = self._generate_summary_check_content(
-            scan_results, all_findings, ai_summary
-        )
+        summary = self._generate_summary_check_content(scan_results, all_findings, ai_summary)
 
         try:
             self.repo.create_check_run(

@@ -7,7 +7,6 @@ CycloneDX 및 SPDX 포맷 지원
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -49,10 +48,7 @@ class SBOMGenerator:
     ):
         self.workspace = workspace
         self.output_format = output_format
-        self.output_path = output_path or os.getenv(
-            "INPUT_SBOM_OUTPUT",
-            "sbom.json"
-        )
+        self.output_path = output_path or os.getenv("INPUT_SBOM_OUTPUT", "sbom.json")
         self.image = image or os.getenv("INPUT_SBOM_IMAGE")
 
     def generate(self) -> dict[str, Any]:
@@ -85,9 +81,12 @@ class SBOMGenerator:
                 cmd.extend(["dir:" + self.workspace])
                 logger.info(f"Scanning directory: {self.workspace}")
 
-            cmd.extend([
-                "--output", f"{self.output_format}={self.output_path}",
-            ])
+            cmd.extend(
+                [
+                    "--output",
+                    f"{self.output_format}={self.output_path}",
+                ]
+            )
 
             # 실행
             result = subprocess.run(
@@ -132,7 +131,9 @@ class SBOMGenerator:
                 "error": "SBOM generation timed out (5 minutes)",
             }
         except FileNotFoundError:
-            logger.error("Syft not found. Install with: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh")
+            logger.error(
+                "Syft not found. Install with: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh"
+            )
             return {
                 "success": False,
                 "error": "Syft not installed",
@@ -181,39 +182,46 @@ class SBOMGenerator:
             # CycloneDX 포맷
             if "components" in data:
                 for comp in data["components"]:
-                    components.append({
-                        "name": comp.get("name", ""),
-                        "version": comp.get("version", ""),
-                        "type": comp.get("type", ""),
-                        "purl": comp.get("purl", ""),
-                        "licenses": [
-                            lic.get("license", {}).get("id", "")
-                            for lic in comp.get("licenses", [])
-                        ],
-                    })
+                    components.append(
+                        {
+                            "name": comp.get("name", ""),
+                            "version": comp.get("version", ""),
+                            "type": comp.get("type", ""),
+                            "purl": comp.get("purl", ""),
+                            "licenses": [
+                                lic.get("license", {}).get("id", "")
+                                for lic in comp.get("licenses", [])
+                            ],
+                        }
+                    )
 
             # SPDX 포맷
             elif "packages" in data:
                 for pkg in data["packages"]:
-                    components.append({
-                        "name": pkg.get("name", ""),
-                        "version": pkg.get("versionInfo", ""),
-                        "type": pkg.get("primaryPackagePurpose", ""),
-                        "purl": pkg.get("externalRefs", [{}])[0].get("referenceLocator", "")
-                            if pkg.get("externalRefs") else "",
-                        "licenses": [pkg.get("licenseConcluded", "")],
-                    })
+                    components.append(
+                        {
+                            "name": pkg.get("name", ""),
+                            "version": pkg.get("versionInfo", ""),
+                            "type": pkg.get("primaryPackagePurpose", ""),
+                            "purl": pkg.get("externalRefs", [{}])[0].get("referenceLocator", "")
+                            if pkg.get("externalRefs")
+                            else "",
+                            "licenses": [pkg.get("licenseConcluded", "")],
+                        }
+                    )
 
             # Syft JSON 포맷
             elif "artifacts" in data:
                 for artifact in data["artifacts"]:
-                    components.append({
-                        "name": artifact.get("name", ""),
-                        "version": artifact.get("version", ""),
-                        "type": artifact.get("type", ""),
-                        "purl": artifact.get("purl", ""),
-                        "licenses": artifact.get("licenses", []),
-                    })
+                    components.append(
+                        {
+                            "name": artifact.get("name", ""),
+                            "version": artifact.get("version", ""),
+                            "type": artifact.get("type", ""),
+                            "purl": artifact.get("purl", ""),
+                            "licenses": artifact.get("licenses", []),
+                        }
+                    )
 
             return components
 

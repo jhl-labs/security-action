@@ -64,8 +64,10 @@ class ContainerScanner(BaseScanner):
         try:
             cmd = [
                 "trivy",
-                "--format", "json",
-                "--output", report_path,
+                "--format",
+                "json",
+                "--output",
+                report_path,
             ]
 
             if self.image:
@@ -74,11 +76,14 @@ class ContainerScanner(BaseScanner):
                 logger.info(f"Scanning container image: {self.image}")
             elif self.dockerfile_path:
                 # Dockerfile 설정 스캔 (misconfig)
-                cmd.extend([
-                    "config",
-                    "--file-patterns", "Dockerfile",
-                    self.dockerfile_path,
-                ])
+                cmd.extend(
+                    [
+                        "config",
+                        "--file-patterns",
+                        "Dockerfile",
+                        self.dockerfile_path,
+                    ]
+                )
                 logger.info(f"Scanning Dockerfile: {self.dockerfile_path}")
 
             result = self.run_command(cmd)

@@ -30,8 +30,10 @@ class SecretScanner(BaseScanner):
     ):
         super().__init__(workspace)
         # 환경 변수 또는 파라미터에서 설정
-        self.scan_history = scan_history if scan_history is not None else (
-            os.getenv("INPUT_SECRET_SCAN_HISTORY", "false").lower() == "true"
+        self.scan_history = (
+            scan_history
+            if scan_history is not None
+            else (os.getenv("INPUT_SECRET_SCAN_HISTORY", "false").lower() == "true")
         )
         self.baseline_path = baseline_path or os.getenv("INPUT_GITLEAKS_BASELINE")
         self.config_path = config_path or os.getenv("INPUT_GITLEAKS_CONFIG")

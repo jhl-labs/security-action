@@ -318,24 +318,33 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
     scanners_to_run: list[tuple] = []
 
     if config.secret_scan:
-        scanners_to_run.append((
-            "Gitleaks", "secret_scanner", "SecretScanner", "🔐",
-            {"scan_history": config.secret_scan_history}
-        ))
+        scanners_to_run.append(
+            (
+                "Gitleaks",
+                "secret_scanner",
+                "SecretScanner",
+                "🔐",
+                {"scan_history": config.secret_scan_history},
+            )
+        )
     if config.code_scan:
         scanners_to_run.append(("Semgrep", "code_scanner", "CodeScanner", "🔍", {}))
     if config.dependency_scan:
         scanners_to_run.append(("Trivy", "dependency_scanner", "DependencyScanner", "📦", {}))
     if config.container_scan:
-        scanners_to_run.append((
-            "Trivy-Container", "container_scanner", "ContainerScanner", "🐳",
-            {"image": config.container_image}
-        ))
+        scanners_to_run.append(
+            (
+                "Trivy-Container",
+                "container_scanner",
+                "ContainerScanner",
+                "🐳",
+                {"image": config.container_image},
+            )
+        )
     if config.iac_scan:
-        scanners_to_run.append((
-            "Checkov", "iac_scanner", "IaCScanner", "🏗️",
-            {"frameworks": config.iac_frameworks}
-        ))
+        scanners_to_run.append(
+            ("Checkov", "iac_scanner", "IaCScanner", "🏗️", {"frameworks": config.iac_frameworks})
+        )
     if config.sonar_scan:
         scanners_to_run.append(("SonarQube", "sonar_scanner", "SonarScanner", "🔬", {}))
 
@@ -439,8 +448,6 @@ def run_ai_review(
     if github_reporter and github_reporter.is_available():
         github_reporter.start_ai_review_check()
 
-    import time
-
     start_time = time.time()
 
     try:
@@ -476,14 +483,26 @@ def run_ai_review(
                     reviews_dict.append(
                         {
                             "title": review.analysis.title if hasattr(review, "analysis") else "",
-                            "severity": review.analysis.severity.value if hasattr(review, "analysis") else "medium",
-                            "is_false_positive": review.analysis.is_false_positive if hasattr(review, "analysis") else False,
-                            "false_positive_reason": review.analysis.false_positive_reason if hasattr(review, "analysis") else "",
-                            "file_path": review.context.file_path if hasattr(review, "context") else "",
+                            "severity": review.analysis.severity.value
+                            if hasattr(review, "analysis")
+                            else "medium",
+                            "is_false_positive": review.analysis.is_false_positive
+                            if hasattr(review, "analysis")
+                            else False,
+                            "false_positive_reason": review.analysis.false_positive_reason
+                            if hasattr(review, "analysis")
+                            else "",
+                            "file_path": review.context.file_path
+                            if hasattr(review, "context")
+                            else "",
                             "line": review.context.start_line if hasattr(review, "context") else 0,
                             "impact": review.analysis.impact if hasattr(review, "analysis") else "",
-                            "fix": review.remediation.summary if hasattr(review, "remediation") else "",
-                            "code_fix": review.remediation.code_fix if hasattr(review, "remediation") else "",
+                            "fix": review.remediation.summary
+                            if hasattr(review, "remediation")
+                            else "",
+                            "code_fix": review.remediation.code_fix
+                            if hasattr(review, "remediation")
+                            else "",
                         }
                     )
 
@@ -739,10 +758,16 @@ def main() -> int:
     # 설정 로드
     config = Config.from_env()
     console.print("[dim]Configuration loaded[/dim]")
-    console.print(f"  Secret Scan: {config.secret_scan}" + (" (with history)" if config.secret_scan_history else ""))
+    console.print(
+        f"  Secret Scan: {config.secret_scan}"
+        + (" (with history)" if config.secret_scan_history else "")
+    )
     console.print(f"  Code Scan: {config.code_scan}")
     console.print(f"  Dependency Scan: {config.dependency_scan}")
-    console.print(f"  Container Scan: {config.container_scan}" + (f" ({config.container_image})" if config.container_image else ""))
+    console.print(
+        f"  Container Scan: {config.container_scan}"
+        + (f" ({config.container_image})" if config.container_image else "")
+    )
     console.print(f"  IaC Scan: {config.iac_scan}")
     console.print(f"  SonarQube Scan: {config.sonar_scan}")
     console.print(f"  SBOM Generate: {config.sbom_generate}")
@@ -857,7 +882,9 @@ def main() -> int:
                 )
                 set_github_output("sbom-file", sbom_result["output_path"])
             else:
-                console.print(f"  [yellow]⚠[/yellow] SBOM generation failed: {sbom_result.get('error')}")
+                console.print(
+                    f"  [yellow]⚠[/yellow] SBOM generation failed: {sbom_result.get('error')}"
+                )
         except Exception as e:
             console.print(f"  [yellow]⚠[/yellow] SBOM generation error: {e}")
             logger.error(f"SBOM generation error: {e}")
