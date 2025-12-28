@@ -7,12 +7,15 @@ SonarQube Community Edition을 사용한 코드 품질 및 보안 분석
 - 복잡도 분석
 """
 
+import logging
 import os
 from pathlib import Path
 
 import httpx
 
 from .base import BaseScanner, Finding, Severity
+
+logger = logging.getLogger(__name__)
 
 
 class SonarScanner(BaseScanner):
@@ -146,11 +149,14 @@ class SonarScanner(BaseScanner):
     def _fetch_issues(self) -> list[dict]:
         """SonarQube API에서 이슈 가져오기"""
         if not self.token:
+            logger.warning("SonarQube token not provided, skipping issue fetch")
             return []
 
         issues = []
         page = 1
         page_size = 100
+
+        logger.info(f"Fetching issues from SonarQube: {self.server_url}")
 
         while True:
             url = f"{self.server_url}/api/issues/search"
@@ -180,14 +186,26 @@ class SonarScanner(BaseScanner):
                     break
                 page += 1
 
-            except Exception:
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"SonarQube API error (page {page}): "
+                    f"HTTP {e.response.status_code} - {e.response.text[:200]}"
+                )
+                break
+            except httpx.TimeoutException:
+                logger.error(f"SonarQube API timeout (page {page})")
+                break
+            except Exception as e:
+                logger.error(f"SonarQube API error (page {page}): {type(e).__name__}: {e}")
                 break
 
+        logger.info(f"Fetched {len(issues)} issues from SonarQube")
         return issues
 
     def _fetch_hotspots(self) -> list[dict]:
         """Security Hotspots 가져오기"""
         if not self.token:
+            logger.warning("SonarQube token not provided, skipping hotspot fetch")
             return []
 
         url = f"{self.server_url}/api/hotspots/search"
@@ -195,6 +213,8 @@ class SonarScanner(BaseScanner):
             "projectKey": self.project_key,
             "status": "TO_REVIEW",
         }
+
+        logger.info("Fetching security hotspots from SonarQube")
 
         try:
             response = httpx.get(
@@ -204,8 +224,20 @@ class SonarScanner(BaseScanner):
                 timeout=30,
             )
             response.raise_for_status()
-            return response.json().get("hotspots", [])
-        except Exception:
+            hotspots = response.json().get("hotspots", [])
+            logger.info(f"Fetched {len(hotspots)} security hotspots")
+            return hotspots
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"SonarQube hotspots API error: "
+                f"HTTP {e.response.status_code} - {e.response.text[:200]}"
+            )
+            return []
+        except httpx.TimeoutException:
+            logger.error("SonarQube hotspots API timeout")
+            return []
+        except Exception as e:
+            logger.error(f"SonarQube hotspots API error: {type(e).__name__}: {e}")
             return []
 
     def _convert_issue(self, issue: dict) -> Finding | None:

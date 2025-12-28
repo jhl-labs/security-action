@@ -1,14 +1,40 @@
 """Secret Scanner - Gitleaks Wrapper"""
 
 import json
+import logging
+import os
 import tempfile
 from pathlib import Path
 
 from .base import BaseScanner, Finding, Severity
 
+logger = logging.getLogger(__name__)
+
 
 class SecretScanner(BaseScanner):
-    """Gitleaks를 사용한 비밀값 스캐너"""
+    """Gitleaks를 사용한 비밀값 스캐너
+
+    Args:
+        workspace: 스캔할 워크스페이스 경로
+        scan_history: True이면 git commit history도 스캔 (기본: False)
+        baseline_path: 베이스라인 파일 경로 (이전 스캔 결과 무시)
+        config_path: Gitleaks 설정 파일 경로
+    """
+
+    def __init__(
+        self,
+        workspace: str,
+        scan_history: bool | None = None,
+        baseline_path: str | None = None,
+        config_path: str | None = None,
+    ):
+        super().__init__(workspace)
+        # 환경 변수 또는 파라미터에서 설정
+        self.scan_history = scan_history if scan_history is not None else (
+            os.getenv("INPUT_SECRET_SCAN_HISTORY", "false").lower() == "true"
+        )
+        self.baseline_path = baseline_path or os.getenv("INPUT_GITLEAKS_BASELINE")
+        self.config_path = config_path or os.getenv("INPUT_GITLEAKS_CONFIG")
 
     @property
     def name(self) -> str:
@@ -32,8 +58,24 @@ class SecretScanner(BaseScanner):
                 "json",
                 "--report-path",
                 report_path,
-                "--no-git",  # git history 제외, 현재 파일만 스캔
             ]
+
+            # Git history 스캔 여부
+            if not self.scan_history:
+                cmd.append("--no-git")
+                logger.info("Scanning current files only (--no-git)")
+            else:
+                logger.info("Scanning git commit history (full scan)")
+
+            # 베이스라인 설정 (이전 결과 무시)
+            if self.baseline_path and Path(self.baseline_path).exists():
+                cmd.extend(["--baseline-path", self.baseline_path])
+                logger.info(f"Using baseline: {self.baseline_path}")
+
+            # 커스텀 설정 파일
+            if self.config_path and Path(self.config_path).exists():
+                cmd.extend(["--config", self.config_path])
+                logger.info(f"Using config: {self.config_path}")
 
             result = self.run_command(cmd)
 

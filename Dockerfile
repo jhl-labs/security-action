@@ -49,6 +49,11 @@ RUN wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sona
 ENV SONAR_SCANNER_HOME=/opt/sonar-scanner
 ENV PATH="${SONAR_SCANNER_HOME}/bin:${PATH}"
 
+# Syft 설치 (SBOM 생성)
+ARG SYFT_VERSION=1.17.0
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v${SYFT_VERSION} \
+    && syft version
+
 # 작업 디렉토리 설정
 WORKDIR /action
 

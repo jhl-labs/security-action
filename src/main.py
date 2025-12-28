@@ -2,8 +2,10 @@
 """Security Scanner Action - 엔트리포인트"""
 
 import json
+import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -12,6 +14,14 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("security-action")
 
 console = Console()
 
@@ -63,11 +73,25 @@ class ScanResult:
 class Config:
     """액션 설정"""
 
+    # 기본 스캐너
     secret_scan: bool = True
+    secret_scan_history: bool = False
     code_scan: bool = True
     dependency_scan: bool = True
+    # 추가 스캐너
+    container_scan: bool = False
+    container_image: str | None = None
+    iac_scan: bool = False
+    iac_frameworks: list[str] | None = None
+    # SBOM
+    sbom_generate: bool = False
+    sbom_format: str = "cyclonedx-json"
+    sbom_output: str = "sbom.json"
+    # SonarQube
     sonar_scan: bool = False
+    # AI 리뷰
     ai_review: bool = False
+    # 공통
     severity_threshold: Severity = Severity.HIGH
     fail_on_findings: bool = True
     sarif_output: str = "security-results.sarif"
@@ -83,12 +107,29 @@ class Config:
         def str_to_bool(value: str) -> bool:
             return value.lower() in ("true", "1", "yes")
 
+        iac_frameworks_str = os.getenv("INPUT_IAC_FRAMEWORKS", "")
+        iac_frameworks = [f.strip() for f in iac_frameworks_str.split(",") if f.strip()] or None
+
         return cls(
+            # 기본 스캐너
             secret_scan=str_to_bool(os.getenv("INPUT_SECRET_SCAN", "true")),
+            secret_scan_history=str_to_bool(os.getenv("INPUT_SECRET_SCAN_HISTORY", "false")),
             code_scan=str_to_bool(os.getenv("INPUT_CODE_SCAN", "true")),
             dependency_scan=str_to_bool(os.getenv("INPUT_DEPENDENCY_SCAN", "true")),
+            # 추가 스캐너
+            container_scan=str_to_bool(os.getenv("INPUT_CONTAINER_SCAN", "false")),
+            container_image=os.getenv("INPUT_CONTAINER_IMAGE"),
+            iac_scan=str_to_bool(os.getenv("INPUT_IAC_SCAN", "false")),
+            iac_frameworks=iac_frameworks,
+            # SBOM
+            sbom_generate=str_to_bool(os.getenv("INPUT_SBOM_GENERATE", "false")),
+            sbom_format=os.getenv("INPUT_SBOM_FORMAT", "cyclonedx-json"),
+            sbom_output=os.getenv("INPUT_SBOM_OUTPUT", "sbom.json"),
+            # SonarQube
             sonar_scan=str_to_bool(os.getenv("INPUT_SONAR_SCAN", "false")),
+            # AI 리뷰
             ai_review=str_to_bool(os.getenv("INPUT_AI_REVIEW", "false")),
+            # 공통
             severity_threshold=Severity.from_string(os.getenv("INPUT_SEVERITY_THRESHOLD", "high")),
             fail_on_findings=str_to_bool(os.getenv("INPUT_FAIL_ON_FINDINGS", "true")),
             sarif_output=os.getenv("INPUT_SARIF_OUTPUT", "security-results.sarif"),
@@ -273,18 +314,32 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
 
     console.print(f"[dim]Scanning directory: {workspace}[/dim]\n")
 
-    # 스캐너 설정 목록
-    scanners_to_run = []
-    if config.secret_scan:
-        scanners_to_run.append(("Gitleaks", "secret_scanner", "SecretScanner", "🔐"))
-    if config.code_scan:
-        scanners_to_run.append(("Semgrep", "code_scanner", "CodeScanner", "🔍"))
-    if config.dependency_scan:
-        scanners_to_run.append(("Trivy", "dependency_scanner", "DependencyScanner", "📦"))
-    if config.sonar_scan:
-        scanners_to_run.append(("SonarQube", "sonar_scanner", "SonarScanner", "🔬"))
+    # 스캐너 설정 목록: (이름, 모듈명, 클래스명, 아이콘, 추가설정)
+    scanners_to_run: list[tuple] = []
 
-    for scanner_name, module_name, class_name, icon in scanners_to_run:
+    if config.secret_scan:
+        scanners_to_run.append((
+            "Gitleaks", "secret_scanner", "SecretScanner", "🔐",
+            {"scan_history": config.secret_scan_history}
+        ))
+    if config.code_scan:
+        scanners_to_run.append(("Semgrep", "code_scanner", "CodeScanner", "🔍", {}))
+    if config.dependency_scan:
+        scanners_to_run.append(("Trivy", "dependency_scanner", "DependencyScanner", "📦", {}))
+    if config.container_scan:
+        scanners_to_run.append((
+            "Trivy-Container", "container_scanner", "ContainerScanner", "🐳",
+            {"image": config.container_image}
+        ))
+    if config.iac_scan:
+        scanners_to_run.append((
+            "Checkov", "iac_scanner", "IaCScanner", "🏗️",
+            {"frameworks": config.iac_frameworks}
+        ))
+    if config.sonar_scan:
+        scanners_to_run.append(("SonarQube", "sonar_scanner", "SonarScanner", "🔬", {}))
+
+    for scanner_name, module_name, class_name, icon, extra_config in scanners_to_run:
         console.print(f"[bold cyan]{icon} Running {scanner_name}...[/bold cyan]")
 
         # Check Run 시작 (in_progress 상태)
@@ -295,7 +350,7 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
         try:
             module = __import__(f"scanners.{module_name}", fromlist=[class_name])
             scanner_class = getattr(module, class_name)
-            scanner = scanner_class(workspace)
+            scanner = scanner_class(workspace, **extra_config)
             result = scanner.scan()
             results.append(result)
 
@@ -684,10 +739,13 @@ def main() -> int:
     # 설정 로드
     config = Config.from_env()
     console.print("[dim]Configuration loaded[/dim]")
-    console.print(f"  Secret Scan: {config.secret_scan}")
+    console.print(f"  Secret Scan: {config.secret_scan}" + (" (with history)" if config.secret_scan_history else ""))
     console.print(f"  Code Scan: {config.code_scan}")
     console.print(f"  Dependency Scan: {config.dependency_scan}")
+    console.print(f"  Container Scan: {config.container_scan}" + (f" ({config.container_image})" if config.container_image else ""))
+    console.print(f"  IaC Scan: {config.iac_scan}")
     console.print(f"  SonarQube Scan: {config.sonar_scan}")
+    console.print(f"  SBOM Generate: {config.sbom_generate}")
     console.print(f"  AI Review: {config.ai_review}")
     console.print(f"  Severity Threshold: {config.severity_threshold.value}")
     console.print()
@@ -736,6 +794,73 @@ def main() -> int:
                     "suggestion": finding.suggestion,
                 }
             )
+
+    # False Positive 필터링
+    suppressed_findings = []
+    try:
+        from config.false_positives import FalsePositiveManager, create_fp_rules_from_config
+        from config.loader import load_config as load_yaml_config
+
+        workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+        yaml_config = load_yaml_config(config.config_path, workspace)
+
+        if yaml_config.false_positives:
+            fp_rules = create_fp_rules_from_config(
+                [fp.model_dump() for fp in yaml_config.false_positives]
+            )
+            fp_manager = FalsePositiveManager(fp_rules)
+
+            # 베이스라인 로드 (있는 경우)
+            baseline_path = os.path.join(workspace, ".security-baseline.json")
+            fp_manager.load_baseline(baseline_path)
+
+            # 필터링 적용
+            all_findings, suppressed_findings = fp_manager.filter_findings(all_findings)
+
+            if suppressed_findings:
+                console.print(
+                    f"\n[dim]ℹ️  {len(suppressed_findings)} finding(s) suppressed by false positive rules[/dim]"
+                )
+                for sf in suppressed_findings[:5]:
+                    console.print(
+                        f"   [dim]- {sf.get('rule_id', 'Unknown')}: {sf.get('suppress_reason', 'No reason')}[/dim]"
+                    )
+                if len(suppressed_findings) > 5:
+                    console.print(f"   [dim]... and {len(suppressed_findings) - 5} more[/dim]")
+
+            logger.info(
+                f"False positive filtering: {len(suppressed_findings)} suppressed, "
+                f"{len(all_findings)} remaining"
+            )
+    except ImportError as e:
+        logger.warning(f"False positive filtering unavailable: {e}")
+    except Exception as e:
+        logger.error(f"False positive filtering failed: {e}")
+
+    # SBOM 생성
+    if config.sbom_generate:
+        console.print("\n[bold cyan]📦 Generating SBOM...[/bold cyan]")
+        try:
+            from scanners.sbom_generator import generate_sbom
+
+            workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+            sbom_result = generate_sbom(
+                workspace=workspace,
+                output_format=config.sbom_format,
+                output_path=config.sbom_output,
+            )
+
+            if sbom_result["success"]:
+                console.print(
+                    f"  [green]✓[/green] SBOM generated: {sbom_result['output_path']} "
+                    f"({sbom_result['components_count']} components)"
+                )
+                set_github_output("sbom-file", sbom_result["output_path"])
+            else:
+                console.print(f"  [yellow]⚠[/yellow] SBOM generation failed: {sbom_result.get('error')}")
+        except Exception as e:
+            console.print(f"  [yellow]⚠[/yellow] SBOM generation error: {e}")
+            logger.error(f"SBOM generation error: {e}")
 
     # 리포팅
     generate_reports(results, all_findings, config, ai_review_result)
