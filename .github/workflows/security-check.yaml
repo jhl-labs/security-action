@@ -10,15 +10,23 @@ on:
     - cron: '0 0 * * 0'
   workflow_dispatch:  # 수동 실행 허용
 
+# =============================================================================
+# GHAS 스타일 보안 스캔
+# - "Security scan results" 체크를 브랜치 보호 규칙에 추가하여 PR 머지 제어
+# - Settings → Branches → Branch protection rules에서 설정
+# =============================================================================
+
 jobs:
-  # 기본 보안 스캔
+  # 기본 보안 스캔 (GHAS 대체)
   security-scan:
     name: Security Scan
     runs-on: jhl-space
     permissions:
       contents: read
-      security-events: write
-      pull-requests: write
+      security-events: write  # SARIF 업로드
+      pull-requests: write    # PR 코멘트
+      checks: write           # Check Run 생성 (GHAS 스타일)
+      statuses: write         # Commit Status API
 
     steps:
       - name: Checkout repository
@@ -70,6 +78,13 @@ jobs:
         run: |
           echo "## 🛡️ Security Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### GHAS-Style Checks Created" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ **Security scan results** - Required status check for branch protection" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔐 Secret Scan" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔍 Code Scan" >> $GITHUB_STEP_SUMMARY
+          echo "- 📦 Dependency Scan" >> $GITHUB_STEP_SUMMARY
+          echo "- 🏗️ IaC Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Findings" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -81,12 +96,16 @@ jobs:
           echo "- 📄 SARIF: \`${{ steps.security.outputs.sarif-file }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- 📦 SBOM: \`${{ steps.security.outputs.sbom-file }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Branch Protection" >> $GITHUB_STEP_SUMMARY
+          echo "Add **Security scan results** as required status check:" >> $GITHUB_STEP_SUMMARY
+          echo "Settings → Branches → Add rule → Require status checks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.security.outputs.findings-count }}" != "0" ]; then
             echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
-            echo "> Security issues were found. Please review the findings." >> $GITHUB_STEP_SUMMARY
+            echo "> Security issues were found. Review the **Security scan results** check for details." >> $GITHUB_STEP_SUMMARY
           else
             echo "> [!NOTE]" >> $GITHUB_STEP_SUMMARY
-            echo "> No security issues found." >> $GITHUB_STEP_SUMMARY
+            echo "> No security issues found. All checks passed." >> $GITHUB_STEP_SUMMARY
           fi
 
   # 컨테이너 이미지 스캔 (빌드 후)
@@ -94,6 +113,10 @@ jobs:
     name: Container Scan
     runs-on: jhl-space
     needs: build-test  # 빌드 완료 후 실행
+    permissions:
+      contents: read
+      checks: write
+      statuses: write
 
     steps:
       - name: Checkout repository
@@ -133,8 +156,14 @@ jobs:
         run: |
           echo "## 🐳 Container Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Checks Created" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ **Security scan results** - Container vulnerabilities check" >> $GITHUB_STEP_SUMMARY
+          echo "- 🐳 Container Scan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
           echo "- **Image**: \`security-action:scan-test\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Findings**: ${{ steps.container-scan.outputs.findings-count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Threshold**: critical (only critical issues block)" >> $GITHUB_STEP_SUMMARY
 
   # Docker 이미지 빌드 테스트
   build-test:
