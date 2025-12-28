@@ -717,23 +717,9 @@ def generate_reports(
                             github.create_pr_review(finding_comments)
                             console.print("  [green]✓[/green] PR review created")
 
-                # 통합 Summary Check Run 생성
-                scan_results_summary = [
-                    {
-                        "scanner": r.scanner,
-                        "success": r.success,
-                        "findings_count": len(r.findings),
-                        "time": f"{r.execution_time:.2f}s",
-                    }
-                    for r in results
-                ]
-
-                github.create_summary_check_run(
-                    scan_results=scan_results_summary,
-                    all_findings=all_findings,
-                    ai_summary=ai_summary,
-                )
-                console.print("  [green]✓[/green] Summary Check Run created")
+                # Note: Summary Check Run 제거됨
+                # "Security scan results" Required Check가 이미 동일한 summary를 제공하므로
+                # 중복되는 "🛡️ Security Scan Summary" Check Run은 생성하지 않음
 
             else:
                 console.print("  [dim]GitHub API not available (no repo context)[/dim]")

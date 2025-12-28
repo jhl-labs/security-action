@@ -78,27 +78,31 @@ jobs:
         run: |
           echo "## 🛡️ Security Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### GHAS-Style Checks Created" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Security scan results** - Required status check for branch protection" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔐 Secret Scan" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔍 Code Scan" >> $GITHUB_STEP_SUMMARY
-          echo "- 📦 Dependency Scan" >> $GITHUB_STEP_SUMMARY
-          echo "- 🏗️ IaC Scan" >> $GITHUB_STEP_SUMMARY
+          echo "### Check Runs Created (GHAS-Style)" >> $GITHUB_STEP_SUMMARY
+          echo "| Check Run | Description |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Security scan results** | Required status check for branch protection |" >> $GITHUB_STEP_SUMMARY
+          echo "| **🔐 Secret Scan** | Scans for hardcoded secrets (Gitleaks) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **🔍 Code Scan** | Static analysis for vulnerabilities (Semgrep) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **📦 Dependency Scan** | Dependency vulnerability scan (Trivy) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **🏗️ IaC Scan** | Infrastructure as Code scan (Checkov) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Findings" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Findings | ${{ steps.security.outputs.findings-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Critical | ${{ steps.security.outputs.critical-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| High | ${{ steps.security.outputs.high-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 Critical | ${{ steps.security.outputs.critical-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 High | ${{ steps.security.outputs.high-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | **${{ steps.security.outputs.findings-count }}** |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Generated Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "- 📄 SARIF: \`${{ steps.security.outputs.sarif-file }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- 📦 SBOM: \`${{ steps.security.outputs.sbom-file }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "| Type | File |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 📄 SARIF | \`${{ steps.security.outputs.sarif-file }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 SBOM | \`${{ steps.security.outputs.sbom-file }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Branch Protection" >> $GITHUB_STEP_SUMMARY
-          echo "Add **Security scan results** as required status check:" >> $GITHUB_STEP_SUMMARY
-          echo "Settings → Branches → Add rule → Require status checks" >> $GITHUB_STEP_SUMMARY
+          echo "### Branch Protection Setup" >> $GITHUB_STEP_SUMMARY
+          echo "Add \`Security scan results\` as required status check:" >> $GITHUB_STEP_SUMMARY
+          echo "\`Settings → Branches → Add rule → Require status checks\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.security.outputs.findings-count }}" != "0" ]; then
             echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
@@ -109,10 +113,12 @@ jobs:
           fi
 
   # 컨테이너 이미지 스캔 (빌드 후)
+  # Note: build-test job이 완료된 후에만 실행됨
+  # build-test가 실패하면 이 job은 건너뛰어짐 (skipped)
   container-scan:
     name: Container Scan
     runs-on: jhl-space
-    needs: build-test  # 빌드 완료 후 실행
+    needs: build-test  # 빌드 완료 후 실행 (의존성)
     permissions:
       contents: read
       checks: write
@@ -156,14 +162,18 @@ jobs:
         run: |
           echo "## 🐳 Container Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Checks Created" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Security scan results** - Container vulnerabilities check" >> $GITHUB_STEP_SUMMARY
-          echo "- 🐳 Container Scan" >> $GITHUB_STEP_SUMMARY
+          echo "### Check Runs Created" >> $GITHUB_STEP_SUMMARY
+          echo "| Check Run | Description |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Security scan results** | Required status check (container scan) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **🐳 Container Scan** | Container image vulnerability scan |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Results" >> $GITHUB_STEP_SUMMARY
           echo "- **Image**: \`security-action:scan-test\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Findings**: ${{ steps.container-scan.outputs.findings-count }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Threshold**: critical (only critical issues block)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Note**: This job only runs after \`build-test\` completes successfully." >> $GITHUB_STEP_SUMMARY
 
   # Docker 이미지 빌드 테스트
   build-test:
