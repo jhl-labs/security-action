@@ -775,19 +775,30 @@ def main() -> int:
     console.print(f"  Severity Threshold: {config.severity_threshold.value}")
     console.print()
 
-    # GitHub Reporter 초기화 (Check Run 업데이트용)
+    # GitHub Reporter 초기화 (GHAS 스타일 Check Run 관리)
     github_reporter = None
+    scan_start_time = time.time()
+
     if config.github_token:
         try:
             from reporters import GitHubReporter
 
-            github_reporter = GitHubReporter(config.github_token)
+            github_reporter = GitHubReporter(
+                token=config.github_token,
+                severity_threshold=config.severity_threshold.value,
+                fail_on_findings=config.fail_on_findings,
+            )
             if github_reporter.is_available():
                 console.print("[green]✓[/green] GitHub Check Run integration enabled")
+                console.print(f"  Required check: {github_reporter.REQUIRED_CHECK_NAME}")
+
+                # Required Status Check 시작 (GHAS 스타일)
+                github_reporter.start_required_check()
             else:
                 console.print("[dim]GitHub API available but no repo context[/dim]")
         except Exception as e:
             console.print(f"[yellow]⚠[/yellow] GitHub Reporter init failed: {e}")
+            logger.exception("GitHub Reporter initialization failed")
 
     # 스캐너 실행 (각 스캐너별 Check Run 생성)
     results = run_scanners(config, github_reporter)
@@ -894,6 +905,37 @@ def main() -> int:
 
     # GitHub Actions 출력
     set_github_output("scan-results", json.dumps(all_findings))
+
+    # 총 실행 시간 계산
+    total_execution_time = time.time() - scan_start_time
+
+    # Required Status Check 완료 (GHAS 스타일)
+    if github_reporter and github_reporter.is_available():
+        # 스캔 결과를 summary 형태로 변환
+        scan_summary = []
+        for r in results:
+            scan_summary.append(
+                {
+                    "scanner": r.get("scanner", "Unknown"),
+                    "success": r.get("success", False),
+                    "findings_count": len(r.get("findings", [])),
+                    "time": f"{r.get('execution_time', 0):.2f}s",
+                }
+            )
+
+        # Required Check 완료
+        github_reporter.complete_required_check(
+            all_findings=all_findings,
+            scan_results=scan_summary,
+            execution_time=total_execution_time,
+        )
+
+        # 전체 Commit Status 생성
+        github_reporter.create_overall_status(all_findings)
+
+        console.print(
+            f"\n[green]✓[/green] GitHub Check completed: {github_reporter.REQUIRED_CHECK_NAME}"
+        )
 
     # 실패 여부 판단
     if should_fail(results, config):
