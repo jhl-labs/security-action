@@ -1,9 +1,11 @@
 """GitHub 리포터 - PR 코멘트 및 Check Run"""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from github import Github
+from github.CheckRun import CheckRun
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
@@ -21,6 +23,16 @@ class FindingComment:
     code_fix: str | None = None
 
 
+@dataclass
+class CheckRunContext:
+    """Check Run 컨텍스트 - 진행 상태 추적용"""
+
+    check_run: CheckRun
+    name: str
+    scanner: str
+    annotations_count: int = 0
+
+
 class GitHubReporter:
     """GitHub API를 통한 리포팅"""
 
@@ -32,11 +44,43 @@ class GitHubReporter:
         "info": "⚪",
     }
 
+    SCANNER_INFO = {
+        "Gitleaks": {
+            "name": "Secret Scan",
+            "icon": "🔐",
+            "description": "Scans for hardcoded secrets, API keys, and credentials",
+        },
+        "Semgrep": {
+            "name": "Code Scan",
+            "icon": "🔍",
+            "description": "Static analysis for security vulnerabilities (SAST)",
+        },
+        "Trivy": {
+            "name": "Dependency Scan",
+            "icon": "📦",
+            "description": "Scans dependencies for known vulnerabilities (SCA)",
+        },
+        "SonarQube": {
+            "name": "SonarQube Scan",
+            "icon": "🔬",
+            "description": "Deep code analysis and security hotspots",
+        },
+        "AI Review": {
+            "name": "AI Security Review",
+            "icon": "🤖",
+            "description": "AI-powered security analysis and remediation suggestions",
+        },
+    }
+
+    # GitHub API 제한: 한 번에 최대 50개 어노테이션
+    MAX_ANNOTATIONS_PER_REQUEST = 50
+
     def __init__(self, token: str | None = None):
         self.token = token or os.getenv("GITHUB_TOKEN") or os.getenv("INPUT_GITHUB_TOKEN")
         self.github: Github | None = None
         self.repo: Repository | None = None
         self.pr: PullRequest | None = None
+        self._active_check_runs: dict[str, CheckRunContext] = {}
 
         if self.token:
             self.github = Github(self.token)
@@ -265,6 +309,757 @@ class GitHubReporter:
             "info": "notice",
         }
         return mapping.get(severity.lower(), "warning")
+
+    def _get_sha(self) -> str | None:
+        """현재 커밋 SHA 가져오기"""
+        return os.getenv("GITHUB_SHA")
+
+    # =========================================================================
+    # 스캐너별 Check Run 생성/관리
+    # =========================================================================
+
+    def start_scanner_check(self, scanner: str) -> CheckRunContext | None:
+        """스캐너별 Check Run 시작 (in_progress 상태)
+
+        Args:
+            scanner: 스캐너 이름 (Gitleaks, Semgrep, Trivy, SonarQube, AI Review)
+
+        Returns:
+            CheckRunContext or None if failed
+        """
+        if not self.repo:
+            return None
+
+        sha = self._get_sha()
+        if not sha:
+            return None
+
+        scanner_info = self.SCANNER_INFO.get(scanner, {})
+        name = scanner_info.get("name", scanner)
+        icon = scanner_info.get("icon", "🔍")
+        description = scanner_info.get("description", f"Running {scanner}")
+
+        try:
+            check_run = self.repo.create_check_run(
+                name=f"{icon} {name}",
+                head_sha=sha,
+                status="in_progress",
+                output={
+                    "title": f"{scanner} is running...",
+                    "summary": f"⏳ {description}\n\nPlease wait while the scan completes.",
+                },
+            )
+
+            context = CheckRunContext(
+                check_run=check_run,
+                name=name,
+                scanner=scanner,
+            )
+            self._active_check_runs[scanner] = context
+            return context
+
+        except Exception:
+            return None
+
+    def update_scanner_check(
+        self,
+        scanner: str,
+        findings_so_far: int = 0,
+        message: str | None = None,
+    ) -> bool:
+        """스캐너 Check Run 진행 상태 업데이트
+
+        Args:
+            scanner: 스캐너 이름
+            findings_so_far: 현재까지 발견된 취약점 수
+            message: 추가 메시지
+
+        Returns:
+            성공 여부
+        """
+        context = self._active_check_runs.get(scanner)
+        if not context:
+            return False
+
+        scanner_info = self.SCANNER_INFO.get(scanner, {})
+        description = scanner_info.get("description", f"Running {scanner}")
+
+        summary_lines = [
+            f"⏳ {description}",
+            "",
+            f"**Findings so far:** {findings_so_far}",
+        ]
+
+        if message:
+            summary_lines.extend(["", message])
+
+        try:
+            context.check_run.edit(
+                status="in_progress",
+                output={
+                    "title": f"Scanning... ({findings_so_far} issues found)",
+                    "summary": "\n".join(summary_lines),
+                },
+            )
+            return True
+        except Exception:
+            return False
+
+    def complete_scanner_check(
+        self,
+        scanner: str,
+        findings: list[dict],
+        execution_time: float = 0.0,
+        error: str | None = None,
+    ) -> bool:
+        """스캐너 Check Run 완료
+
+        Args:
+            scanner: 스캐너 이름
+            findings: 발견된 취약점 목록
+            execution_time: 실행 시간 (초)
+            error: 에러 메시지 (있는 경우)
+
+        Returns:
+            성공 여부
+        """
+        context = self._active_check_runs.get(scanner)
+
+        # 컨텍스트가 없으면 새로 생성
+        if not context:
+            return self._create_completed_scanner_check(
+                scanner, findings, execution_time, error
+            )
+
+        scanner_info = self.SCANNER_INFO.get(scanner, {})
+        icon = scanner_info.get("icon", "🔍")
+        name = scanner_info.get("name", scanner)
+
+        # 결론 결정
+        conclusion, title = self._determine_conclusion(findings, error)
+
+        # 마크다운 summary 생성
+        summary = self._generate_scanner_summary(
+            scanner, findings, execution_time, error
+        )
+
+        # 어노테이션 생성 (50개 이상 처리)
+        all_annotations = self._create_annotations(findings)
+
+        try:
+            # 첫 번째 50개 어노테이션으로 완료
+            first_batch = all_annotations[: self.MAX_ANNOTATIONS_PER_REQUEST]
+
+            context.check_run.edit(
+                status="completed",
+                conclusion=conclusion,
+                output={
+                    "title": title,
+                    "summary": summary,
+                    "text": self._generate_findings_detail_text(findings),
+                    "annotations": first_batch,
+                },
+            )
+
+            # 50개 초과 시 추가 어노테이션 업데이트
+            remaining = all_annotations[self.MAX_ANNOTATIONS_PER_REQUEST :]
+            self._add_remaining_annotations(context.check_run, remaining, summary)
+
+            # 컨텍스트 정리
+            del self._active_check_runs[scanner]
+            return True
+
+        except Exception:
+            return False
+
+    def _create_completed_scanner_check(
+        self,
+        scanner: str,
+        findings: list[dict],
+        execution_time: float = 0.0,
+        error: str | None = None,
+    ) -> bool:
+        """새로운 완료된 스캐너 Check Run 생성"""
+        if not self.repo:
+            return False
+
+        sha = self._get_sha()
+        if not sha:
+            return False
+
+        scanner_info = self.SCANNER_INFO.get(scanner, {})
+        icon = scanner_info.get("icon", "🔍")
+        name = scanner_info.get("name", scanner)
+
+        conclusion, title = self._determine_conclusion(findings, error)
+        summary = self._generate_scanner_summary(scanner, findings, execution_time, error)
+        all_annotations = self._create_annotations(findings)
+
+        try:
+            first_batch = all_annotations[: self.MAX_ANNOTATIONS_PER_REQUEST]
+
+            check_run = self.repo.create_check_run(
+                name=f"{icon} {name}",
+                head_sha=sha,
+                status="completed",
+                conclusion=conclusion,
+                output={
+                    "title": title,
+                    "summary": summary,
+                    "text": self._generate_findings_detail_text(findings),
+                    "annotations": first_batch,
+                },
+            )
+
+            # 50개 초과 시 추가 어노테이션 업데이트
+            remaining = all_annotations[self.MAX_ANNOTATIONS_PER_REQUEST :]
+            self._add_remaining_annotations(check_run, remaining, summary)
+
+            return True
+
+        except Exception:
+            return False
+
+    def _determine_conclusion(
+        self,
+        findings: list[dict],
+        error: str | None = None,
+    ) -> tuple[str, str]:
+        """Check Run conclusion 및 title 결정
+
+        Returns:
+            (conclusion, title) 튜플
+        """
+        if error:
+            return "failure", f"❌ Scan failed: {error[:50]}"
+
+        if not findings:
+            return "success", "✅ No issues found"
+
+        # 심각도별 카운트
+        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for f in findings:
+            sev = f.get("severity", "medium").lower()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+
+        critical_high = severity_counts["critical"] + severity_counts["high"]
+
+        if critical_high > 0:
+            return (
+                "failure",
+                f"🔴 Found {critical_high} critical/high issues ({len(findings)} total)",
+            )
+        elif severity_counts["medium"] > 0:
+            return (
+                "neutral",
+                f"🟡 Found {severity_counts['medium']} medium issues ({len(findings)} total)",
+            )
+        else:
+            return "success", f"✅ Found {len(findings)} low/info issues"
+
+    def _generate_scanner_summary(
+        self,
+        scanner: str,
+        findings: list[dict],
+        execution_time: float = 0.0,
+        error: str | None = None,
+    ) -> str:
+        """스캐너별 마크다운 summary 생성"""
+        scanner_info = self.SCANNER_INFO.get(scanner, {})
+        icon = scanner_info.get("icon", "🔍")
+        description = scanner_info.get("description", scanner)
+
+        lines = [
+            f"## {icon} {scanner}",
+            "",
+            f"> {description}",
+            "",
+        ]
+
+        if error:
+            lines.extend(
+                [
+                    "### ❌ Scan Failed",
+                    "",
+                    f"```\n{error}\n```",
+                ]
+            )
+            return "\n".join(lines)
+
+        # 실행 시간
+        if execution_time > 0:
+            lines.append(f"⏱️ **Execution time:** {execution_time:.2f}s")
+            lines.append("")
+
+        if not findings:
+            lines.extend(
+                [
+                    "### ✅ No Issues Found",
+                    "",
+                    "The scan completed successfully with no security issues detected.",
+                ]
+            )
+            return "\n".join(lines)
+
+        # 심각도별 카운트
+        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for f in findings:
+            sev = f.get("severity", "medium").lower()
+            if sev in severity_counts:
+                severity_counts[sev] += 1
+
+        lines.extend(
+            [
+                "### 📊 Summary",
+                "",
+                "| Severity | Count |",
+                "|----------|-------|",
+            ]
+        )
+
+        for severity in ["critical", "high", "medium", "low", "info"]:
+            count = severity_counts[severity]
+            if count > 0:
+                emoji = self.SEVERITY_EMOJI.get(severity, "⚪")
+                lines.append(f"| {emoji} {severity.upper()} | {count} |")
+
+        lines.extend(
+            [
+                "",
+                f"**Total issues:** {len(findings)}",
+            ]
+        )
+
+        # 상위 5개 취약점 목록
+        if findings:
+            lines.extend(
+                [
+                    "",
+                    "### 🔍 Top Issues",
+                    "",
+                ]
+            )
+            for i, f in enumerate(findings[:5], 1):
+                emoji = self.SEVERITY_EMOJI.get(f.get("severity", ""), "⚪")
+                rule_id = f.get("rule_id", "Unknown")
+                file_path = f.get("file_path", "")
+                line = f.get("line_start", 0)
+                lines.append(f"{i}. {emoji} **{rule_id}** - `{file_path}:{line}`")
+
+            if len(findings) > 5:
+                lines.append(f"\n*...and {len(findings) - 5} more issues*")
+
+        return "\n".join(lines)
+
+    def _generate_findings_detail_text(self, findings: list[dict]) -> str:
+        """상세 취약점 목록 텍스트 생성 (Check Run의 text 필드용)"""
+        if not findings:
+            return ""
+
+        lines = ["## Detailed Findings", ""]
+
+        for i, f in enumerate(findings[:20], 1):
+            emoji = self.SEVERITY_EMOJI.get(f.get("severity", ""), "⚪")
+            severity = f.get("severity", "unknown").upper()
+            rule_id = f.get("rule_id", "Unknown")
+            message = f.get("message", "")
+            file_path = f.get("file_path", "")
+            line_start = f.get("line_start", 0)
+            line_end = f.get("line_end") or line_start
+
+            lines.extend(
+                [
+                    f"### {i}. {emoji} {severity}: {rule_id}",
+                    "",
+                    f"**Location:** `{file_path}:{line_start}-{line_end}`",
+                    "",
+                    f"**Message:** {message}",
+                    "",
+                ]
+            )
+
+            if f.get("suggestion"):
+                lines.extend([f"**Suggestion:** {f['suggestion']}", ""])
+
+            lines.append("---")
+            lines.append("")
+
+        if len(findings) > 20:
+            lines.append(f"*Showing 20 of {len(findings)} issues*")
+
+        return "\n".join(lines)
+
+    def _create_annotations(self, findings: list[dict]) -> list[dict]:
+        """취약점 목록에서 어노테이션 목록 생성"""
+        annotations = []
+        for finding in findings:
+            annotation_level = self._severity_to_annotation_level(
+                finding.get("severity", "medium")
+            )
+            annotations.append(
+                {
+                    "path": finding.get("file_path", ""),
+                    "start_line": finding.get("line_start", 1),
+                    "end_line": finding.get("line_end") or finding.get("line_start", 1),
+                    "annotation_level": annotation_level,
+                    "title": finding.get("rule_id", "Security Issue"),
+                    "message": finding.get("message", ""),
+                }
+            )
+        return annotations
+
+    def _add_remaining_annotations(
+        self,
+        check_run: CheckRun,
+        annotations: list[dict],
+        summary: str,
+    ) -> None:
+        """50개 초과 어노테이션을 배치로 추가"""
+        if not annotations:
+            return
+
+        for i in range(0, len(annotations), self.MAX_ANNOTATIONS_PER_REQUEST):
+            batch = annotations[i : i + self.MAX_ANNOTATIONS_PER_REQUEST]
+            try:
+                check_run.edit(
+                    output={
+                        "title": check_run.output.title if check_run.output else "",
+                        "summary": summary,
+                        "annotations": batch,
+                    }
+                )
+            except Exception:
+                pass  # 실패해도 계속 진행
+
+    # =========================================================================
+    # 통합 Check Run (전체 보안 스캔 요약)
+    # =========================================================================
+
+    def create_summary_check_run(
+        self,
+        scan_results: list[dict],
+        all_findings: list[dict],
+        ai_summary: str | None = None,
+    ) -> bool:
+        """통합 보안 스캔 요약 Check Run 생성
+
+        Args:
+            scan_results: 스캐너별 결과 목록
+            all_findings: 전체 취약점 목록
+            ai_summary: AI 분석 요약 (선택)
+
+        Returns:
+            성공 여부
+        """
+        if not self.repo:
+            return False
+
+        sha = self._get_sha()
+        if not sha:
+            return False
+
+        # 결론 결정
+        conclusion, title = self._determine_conclusion(all_findings, None)
+
+        # 통합 summary 생성
+        summary = self._generate_summary_check_content(
+            scan_results, all_findings, ai_summary
+        )
+
+        try:
+            self.repo.create_check_run(
+                name="🛡️ Security Scan Summary",
+                head_sha=sha,
+                status="completed",
+                conclusion=conclusion,
+                output={
+                    "title": title,
+                    "summary": summary,
+                },
+            )
+            return True
+        except Exception:
+            return False
+
+    def _generate_summary_check_content(
+        self,
+        scan_results: list[dict],
+        all_findings: list[dict],
+        ai_summary: str | None = None,
+    ) -> str:
+        """통합 summary 마크다운 생성"""
+        lines = [
+            "# 🛡️ Security Scan Report",
+            "",
+        ]
+
+        # 스캐너별 결과 테이블
+        lines.extend(
+            [
+                "## Scanner Results",
+                "",
+                "| Scanner | Status | Findings | Time |",
+                "|---------|--------|----------|------|",
+            ]
+        )
+
+        for result in scan_results:
+            scanner = result.get("scanner", "Unknown")
+            scanner_info = self.SCANNER_INFO.get(scanner, {})
+            icon = scanner_info.get("icon", "🔍")
+
+            status = "✅" if result.get("success") else "❌"
+            findings_count = result.get("findings_count", 0)
+            time_str = result.get("time", "N/A")
+
+            lines.append(f"| {icon} {scanner} | {status} | {findings_count} | {time_str} |")
+
+        # 심각도별 요약
+        if all_findings:
+            severity_counts = {}
+            for f in all_findings:
+                sev = f.get("severity", "unknown")
+                severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+            lines.extend(
+                [
+                    "",
+                    "## Findings by Severity",
+                    "",
+                ]
+            )
+
+            for severity in ["critical", "high", "medium", "low", "info"]:
+                count = severity_counts.get(severity, 0)
+                if count > 0:
+                    emoji = self.SEVERITY_EMOJI.get(severity, "⚪")
+                    lines.append(f"- {emoji} **{severity.upper()}**: {count}")
+
+            lines.append(f"\n**Total: {len(all_findings)} issues**")
+        else:
+            lines.extend(
+                [
+                    "",
+                    "## ✅ No Security Issues Found",
+                    "",
+                    "All scans completed successfully with no vulnerabilities detected.",
+                ]
+            )
+
+        # AI 분석 요약
+        if ai_summary:
+            lines.extend(
+                [
+                    "",
+                    "## 🤖 AI Analysis Summary",
+                    "",
+                    ai_summary,
+                ]
+            )
+
+        lines.extend(
+            [
+                "",
+                "---",
+                "_🤖 Generated by Security Scanner Action_",
+            ]
+        )
+
+        return "\n".join(lines)
+
+    # =========================================================================
+    # AI Review 전용 Check Run
+    # =========================================================================
+
+    def start_ai_review_check(self) -> CheckRunContext | None:
+        """AI Review Check Run 시작"""
+        return self.start_scanner_check("AI Review")
+
+    def complete_ai_review_check(
+        self,
+        reviews: list[dict],
+        summary: str | None = None,
+        execution_time: float = 0.0,
+        error: str | None = None,
+    ) -> bool:
+        """AI Review Check Run 완료
+
+        Args:
+            reviews: AI 분석 결과 목록
+            summary: AI 요약
+            execution_time: 실행 시간
+            error: 에러 메시지
+
+        Returns:
+            성공 여부
+        """
+        context = self._active_check_runs.get("AI Review")
+
+        if not self.repo:
+            return False
+
+        sha = self._get_sha()
+        if not sha:
+            return False
+
+        scanner_info = self.SCANNER_INFO["AI Review"]
+        icon = scanner_info["icon"]
+        name = scanner_info["name"]
+
+        # 결론 결정
+        if error:
+            conclusion = "failure"
+            title = f"❌ AI Review failed: {error[:50]}"
+        elif not reviews:
+            conclusion = "success"
+            title = "✅ AI Review: No actionable issues"
+        else:
+            # 거짓 양성 제외한 실제 이슈 수 계산
+            real_issues = sum(1 for r in reviews if not r.get("is_false_positive", False))
+            if real_issues == 0:
+                conclusion = "success"
+                title = f"✅ All {len(reviews)} findings are likely false positives"
+            else:
+                conclusion = "neutral"
+                title = f"🤖 AI reviewed {len(reviews)} findings ({real_issues} actionable)"
+
+        # AI summary 생성
+        summary_content = self._generate_ai_review_summary(reviews, summary, execution_time, error)
+
+        try:
+            if context:
+                context.check_run.edit(
+                    status="completed",
+                    conclusion=conclusion,
+                    output={
+                        "title": title,
+                        "summary": summary_content,
+                        "text": self._generate_ai_review_detail(reviews) if reviews else "",
+                    },
+                )
+                del self._active_check_runs["AI Review"]
+            else:
+                self.repo.create_check_run(
+                    name=f"{icon} {name}",
+                    head_sha=sha,
+                    status="completed",
+                    conclusion=conclusion,
+                    output={
+                        "title": title,
+                        "summary": summary_content,
+                        "text": self._generate_ai_review_detail(reviews) if reviews else "",
+                    },
+                )
+            return True
+        except Exception:
+            return False
+
+    def _generate_ai_review_summary(
+        self,
+        reviews: list[dict],
+        summary: str | None,
+        execution_time: float,
+        error: str | None,
+    ) -> str:
+        """AI Review summary 마크다운 생성"""
+        lines = [
+            "## 🤖 AI Security Review",
+            "",
+            "> AI-powered analysis of security findings with remediation suggestions",
+            "",
+        ]
+
+        if error:
+            lines.extend([f"### ❌ Error\n\n```\n{error}\n```"])
+            return "\n".join(lines)
+
+        if execution_time > 0:
+            lines.append(f"⏱️ **Analysis time:** {execution_time:.2f}s")
+            lines.append("")
+
+        if summary:
+            lines.extend(["### 📝 Executive Summary", "", summary, ""])
+
+        if reviews:
+            false_positives = sum(1 for r in reviews if r.get("is_false_positive", False))
+            real_issues = len(reviews) - false_positives
+
+            lines.extend(
+                [
+                    "### 📊 Analysis Results",
+                    "",
+                    f"- **Total reviewed:** {len(reviews)}",
+                    f"- **Actionable issues:** {real_issues}",
+                    f"- **False positives:** {false_positives}",
+                    "",
+                ]
+            )
+
+        return "\n".join(lines)
+
+    def _generate_ai_review_detail(self, reviews: list[dict]) -> str:
+        """AI Review 상세 결과 텍스트 생성"""
+        if not reviews:
+            return ""
+
+        lines = ["## Detailed AI Analysis", ""]
+
+        for i, review in enumerate(reviews, 1):
+            is_fp = review.get("is_false_positive", False)
+            title = review.get("title", "Unknown Issue")
+            file_path = review.get("file_path", "")
+            line = review.get("line", 0)
+            impact = review.get("impact", "")
+            fix = review.get("fix", "")
+
+            if is_fp:
+                lines.extend(
+                    [
+                        f"### {i}. ⚪ {title} (False Positive)",
+                        "",
+                        f"**Location:** `{file_path}:{line}`",
+                        "",
+                        f"**Reason:** {review.get('false_positive_reason', 'N/A')}",
+                        "",
+                        "---",
+                        "",
+                    ]
+                )
+            else:
+                severity = review.get("severity", "medium")
+                emoji = self.SEVERITY_EMOJI.get(severity, "⚪")
+
+                lines.extend(
+                    [
+                        f"### {i}. {emoji} {title}",
+                        "",
+                        f"**Severity:** {severity.upper()}",
+                        f"**Location:** `{file_path}:{line}`",
+                        "",
+                    ]
+                )
+
+                if impact:
+                    lines.extend([f"**Impact:** {impact}", ""])
+
+                if fix:
+                    lines.extend([f"**Remediation:** {fix}", ""])
+
+                if review.get("code_fix"):
+                    lines.extend(
+                        [
+                            "**Suggested fix:**",
+                            "```",
+                            review["code_fix"],
+                            "```",
+                            "",
+                        ]
+                    )
+
+                lines.extend(["---", ""])
+
+        return "\n".join(lines)
 
     def post_summary(
         self,

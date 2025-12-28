@@ -258,46 +258,98 @@ def print_findings_detail(results: list[ScanResult], config: Config) -> None:
         console.print(panel)
 
 
-def run_scanners(config: Config) -> list[ScanResult]:
-    """모든 스캐너 실행"""
+def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult]:
+    """모든 스캐너 실행
+
+    Args:
+        config: 액션 설정
+        github_reporter: GitHubReporter 인스턴스 (Check Run 업데이트용)
+
+    Returns:
+        스캔 결과 목록
+    """
     results: list[ScanResult] = []
     workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
 
     console.print(f"[dim]Scanning directory: {workspace}[/dim]\n")
 
+    # 스캐너 설정 목록
+    scanners_to_run = []
     if config.secret_scan:
-        console.print("[bold cyan]🔐 Running Secret Scanner (Gitleaks)...[/bold cyan]")
-        from scanners.secret_scanner import SecretScanner
-
-        scanner = SecretScanner(workspace)
-        results.append(scanner.scan())
-
+        scanners_to_run.append(("Gitleaks", "secret_scanner", "SecretScanner", "🔐"))
     if config.code_scan:
-        console.print("[bold cyan]🔍 Running Code Scanner (Semgrep)...[/bold cyan]")
-        from scanners.code_scanner import CodeScanner
-
-        scanner = CodeScanner(workspace)
-        results.append(scanner.scan())
-
+        scanners_to_run.append(("Semgrep", "code_scanner", "CodeScanner", "🔍"))
     if config.dependency_scan:
-        console.print("[bold cyan]📦 Running Dependency Scanner (Trivy)...[/bold cyan]")
-        from scanners.dependency_scanner import DependencyScanner
-
-        scanner = DependencyScanner(workspace)
-        results.append(scanner.scan())
-
+        scanners_to_run.append(("Trivy", "dependency_scanner", "DependencyScanner", "📦"))
     if config.sonar_scan:
-        console.print("[bold cyan]🔬 Running SonarQube Scanner...[/bold cyan]")
-        from scanners.sonar_scanner import SonarScanner
+        scanners_to_run.append(("SonarQube", "sonar_scanner", "SonarScanner", "🔬"))
 
-        scanner = SonarScanner(workspace)
-        results.append(scanner.scan())
+    for scanner_name, module_name, class_name, icon in scanners_to_run:
+        console.print(f"[bold cyan]{icon} Running {scanner_name}...[/bold cyan]")
+
+        # Check Run 시작 (in_progress 상태)
+        if github_reporter and github_reporter.is_available():
+            github_reporter.start_scanner_check(scanner_name)
+
+        # 스캐너 동적 로드 및 실행
+        try:
+            module = __import__(f"scanners.{module_name}", fromlist=[class_name])
+            scanner_class = getattr(module, class_name)
+            scanner = scanner_class(workspace)
+            result = scanner.scan()
+            results.append(result)
+
+            # Check Run 완료
+            if github_reporter and github_reporter.is_available():
+                findings_dict = [
+                    {
+                        "scanner": f.scanner,
+                        "rule_id": f.rule_id,
+                        "severity": f.severity.value,
+                        "message": f.message,
+                        "file_path": f.file_path,
+                        "line_start": f.line_start,
+                        "line_end": f.line_end,
+                        "suggestion": f.suggestion,
+                    }
+                    for f in result.findings
+                ]
+                github_reporter.complete_scanner_check(
+                    scanner=scanner_name,
+                    findings=findings_dict,
+                    execution_time=result.execution_time,
+                    error=result.error if not result.success else None,
+                )
+                console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+
+        except Exception as e:
+            console.print(f"[red]Error running {scanner_name}: {e}[/red]")
+            # 에러 발생 시 Check Run 실패로 완료
+            if github_reporter and github_reporter.is_available():
+                github_reporter.complete_scanner_check(
+                    scanner=scanner_name,
+                    findings=[],
+                    error=str(e),
+                )
 
     return results
 
 
-def run_ai_review(results: list[ScanResult], config: Config) -> Any:
-    """AI 기반 보안 리뷰 실행"""
+def run_ai_review(
+    results: list[ScanResult],
+    config: Config,
+    github_reporter: Any = None,
+) -> Any:
+    """AI 기반 보안 리뷰 실행
+
+    Args:
+        results: 스캔 결과 목록
+        config: 액션 설정
+        github_reporter: GitHubReporter 인스턴스 (Check Run 업데이트용)
+
+    Returns:
+        AI 리뷰 결과 상태
+    """
     console.print("\n[bold cyan]🤖 Running AI Security Review...[/bold cyan]")
 
     # API 키 확인
@@ -328,6 +380,14 @@ def run_ai_review(results: list[ScanResult], config: Config) -> Any:
 
     console.print(f"[dim]Reviewing {len(all_findings)} finding(s)...[/dim]")
 
+    # AI Review Check Run 시작
+    if github_reporter and github_reporter.is_available():
+        github_reporter.start_ai_review_check()
+
+    import time
+
+    start_time = time.time()
+
     try:
         from agent import run_security_review
 
@@ -337,19 +397,69 @@ def run_ai_review(results: list[ScanResult], config: Config) -> Any:
             workspace_path=workspace,
         )
 
+        execution_time = time.time() - start_time
+
         if state.error:
             console.print(f"[red]AI Review error: {state.error}[/red]")
+            # Check Run 실패로 완료
+            if github_reporter and github_reporter.is_available():
+                github_reporter.complete_ai_review_check(
+                    reviews=[],
+                    error=state.error,
+                    execution_time=execution_time,
+                )
             return None
 
         # 결과 출력
         print_ai_review_results(state)
+
+        # AI Review Check Run 완료
+        if github_reporter and github_reporter.is_available():
+            reviews_dict = []
+            if hasattr(state, "reviews") and state.reviews:
+                for review in state.reviews:
+                    reviews_dict.append(
+                        {
+                            "title": review.analysis.title if hasattr(review, "analysis") else "",
+                            "severity": review.analysis.severity.value if hasattr(review, "analysis") else "medium",
+                            "is_false_positive": review.analysis.is_false_positive if hasattr(review, "analysis") else False,
+                            "false_positive_reason": review.analysis.false_positive_reason if hasattr(review, "analysis") else "",
+                            "file_path": review.context.file_path if hasattr(review, "context") else "",
+                            "line": review.context.start_line if hasattr(review, "context") else 0,
+                            "impact": review.analysis.impact if hasattr(review, "analysis") else "",
+                            "fix": review.remediation.summary if hasattr(review, "remediation") else "",
+                            "code_fix": review.remediation.code_fix if hasattr(review, "remediation") else "",
+                        }
+                    )
+
+            github_reporter.complete_ai_review_check(
+                reviews=reviews_dict,
+                summary=state.summary if hasattr(state, "summary") else None,
+                execution_time=execution_time,
+            )
+            console.print("  [green]✓[/green] AI Review Check Run updated")
+
         return state
 
     except ImportError as e:
+        execution_time = time.time() - start_time
         console.print(f"[yellow]AI Review dependencies not available: {e}[/yellow]")
+        if github_reporter and github_reporter.is_available():
+            github_reporter.complete_ai_review_check(
+                reviews=[],
+                error=f"Dependencies not available: {e}",
+                execution_time=execution_time,
+            )
         return None
     except Exception as e:
+        execution_time = time.time() - start_time
         console.print(f"[red]AI Review failed: {e}[/red]")
+        if github_reporter and github_reporter.is_available():
+            github_reporter.complete_ai_review_check(
+                reviews=[],
+                error=str(e),
+                execution_time=execution_time,
+            )
         return None
 
 
@@ -527,22 +637,23 @@ def generate_reports(
                             github.create_pr_review(finding_comments)
                             console.print("  [green]✓[/green] PR review created")
 
-                # Check Run 생성
-                conclusion = "success" if not all_findings else "neutral"
-                critical_high = sum(
-                    1 for f in all_findings if f["severity"] in ("critical", "high")
-                )
-                if critical_high > 0:
-                    conclusion = "failure"
+                # 통합 Summary Check Run 생성
+                scan_results_summary = [
+                    {
+                        "scanner": r.scanner,
+                        "success": r.success,
+                        "findings_count": len(r.findings),
+                        "time": f"{r.execution_time:.2f}s",
+                    }
+                    for r in results
+                ]
 
-                github.create_check_run(
-                    name="Security Scan",
-                    title=f"Found {len(all_findings)} issue(s)",
-                    summary=f"Critical/High: {critical_high}, Total: {len(all_findings)}",
-                    findings=all_findings,
-                    conclusion=conclusion,
+                github.create_summary_check_run(
+                    scan_results=scan_results_summary,
+                    all_findings=all_findings,
+                    ai_summary=ai_summary,
                 )
-                console.print("  [green]✓[/green] Check Run created")
+                console.print("  [green]✓[/green] Summary Check Run created")
 
             else:
                 console.print("  [dim]GitHub API not available (no repo context)[/dim]")
@@ -581,13 +692,27 @@ def main() -> int:
     console.print(f"  Severity Threshold: {config.severity_threshold.value}")
     console.print()
 
-    # 스캐너 실행
-    results = run_scanners(config)
+    # GitHub Reporter 초기화 (Check Run 업데이트용)
+    github_reporter = None
+    if config.github_token:
+        try:
+            from reporters import GitHubReporter
 
-    # AI 리뷰 실행
+            github_reporter = GitHubReporter(config.github_token)
+            if github_reporter.is_available():
+                console.print("[green]✓[/green] GitHub Check Run integration enabled")
+            else:
+                console.print("[dim]GitHub API available but no repo context[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]⚠[/yellow] GitHub Reporter init failed: {e}")
+
+    # 스캐너 실행 (각 스캐너별 Check Run 생성)
+    results = run_scanners(config, github_reporter)
+
+    # AI 리뷰 실행 (AI Review Check Run 생성)
     ai_review_result = None
     if config.ai_review:
-        ai_review_result = run_ai_review(results, config)
+        ai_review_result = run_ai_review(results, config, github_reporter)
 
     # 결과 요약 출력
     print_scan_summary(results, config)
