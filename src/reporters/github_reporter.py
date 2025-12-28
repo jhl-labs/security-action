@@ -677,22 +677,8 @@ class GitHubReporter:
             return False
 
         try:
-            # 어노테이션 생성
-            annotations = []
-            for finding in findings[:50]:  # GitHub API 제한
-                annotation_level = self._severity_to_annotation_level(
-                    finding.get("severity", "medium")
-                )
-                annotations.append(
-                    {
-                        "path": finding.get("file_path", ""),
-                        "start_line": finding.get("line_start", 1),
-                        "end_line": finding.get("line_end") or finding.get("line_start", 1),
-                        "annotation_level": annotation_level,
-                        "title": finding.get("rule_id", "Security Issue"),
-                        "message": finding.get("message", ""),
-                    }
-                )
+            # GHAS 스타일 어노테이션 생성 (최대 50개)
+            annotations = self._create_annotations(findings[:50])
 
             # Check Run 생성
             check_run = self.repo.create_check_run(
@@ -1095,18 +1081,38 @@ class GitHubReporter:
         return "\n".join(lines)
 
     def _create_annotations(self, findings: list[dict]) -> list[dict]:
-        """취약점 목록에서 어노테이션 목록 생성"""
+        """취약점 목록에서 GHAS 스타일 어노테이션 생성
+
+        포맷 (파싱 용이):
+        - title: "RULE_ID"
+        - message: "SEVERITY|SCANNER|CWE|MESSAGE"
+          예: "high|semgrep|CWE-89|SQL injection vulnerability"
+
+        파싱 예시:
+        ```python
+        parts = message.split("|", 3)
+        severity, scanner, cwe, desc = parts[0], parts[1], parts[2], parts[3]
+        ```
+        """
         annotations = []
         for finding in findings:
-            annotation_level = self._severity_to_annotation_level(finding.get("severity", "medium"))
+            severity = finding.get("severity", "medium").lower()
+            scanner = finding.get("scanner", "unknown")
+            rule_id = finding.get("rule_id", "UNKNOWN")
+            message = finding.get("message", "Security issue detected")
+            cwe = finding.get("cwe", finding.get("metadata", {}).get("cwe", ""))
+
+            # GHAS 스타일 간결한 포맷: SEVERITY|SCANNER|CWE|MESSAGE
+            structured_message = f"{severity}|{scanner}|{cwe}|{message}"
+
             annotations.append(
                 {
                     "path": finding.get("file_path", ""),
                     "start_line": finding.get("line_start", 1),
                     "end_line": finding.get("line_end") or finding.get("line_start", 1),
-                    "annotation_level": annotation_level,
-                    "title": finding.get("rule_id", "Security Issue"),
-                    "message": finding.get("message", ""),
+                    "annotation_level": self._severity_to_annotation_level(severity),
+                    "title": rule_id,
+                    "message": structured_message,
                 }
             )
         return annotations

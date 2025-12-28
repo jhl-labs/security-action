@@ -375,6 +375,8 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
                         "line_start": f.line_start,
                         "line_end": f.line_end,
                         "suggestion": f.suggestion,
+                        "cwe": f.metadata.get("cwe", "") if f.metadata else "",
+                        "metadata": f.metadata or {},
                     }
                     for f in result.findings
                 ]
