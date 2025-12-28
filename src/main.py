@@ -650,7 +650,11 @@ def generate_reports(
         try:
             from reporters import FindingComment, GitHubReporter
 
-            github = GitHubReporter(config.github_token)
+            github = GitHubReporter(
+                token=config.github_token,
+                severity_threshold=config.severity_threshold.value,
+                fail_on_findings=config.fail_on_findings,
+            )
 
             if github.is_available():
                 # 스캔 결과 요약
