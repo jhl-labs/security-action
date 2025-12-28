@@ -11,6 +11,7 @@ on:
   workflow_dispatch:  # 수동 실행 허용
 
 jobs:
+  # 기본 보안 스캔
   security-scan:
     name: Security Scan
     runs-on: jhl-space
@@ -29,11 +30,21 @@ jobs:
         id: security
         uses: ./  # 자기 자신을 사용
         with:
+          # 기본 스캐너
           secret-scan: 'true'
+          secret-scan-history: 'true'  # Git history 전체 스캔
           code-scan: 'true'
           dependency-scan: 'true'
+          # 추가 스캐너
+          iac-scan: 'true'  # Dockerfile, GitHub Actions 스캔
+          # SonarQube/AI는 비활성화
           sonar-scan: 'false'
           ai-review: 'false'
+          # SBOM 생성
+          sbom-generate: 'true'
+          sbom-format: 'cyclonedx-json'
+          sbom-output: 'sbom.json'
+          # 공통 설정
           severity-threshold: 'high'
           fail-on-findings: 'false'  # 테스트 픽스처 때문에 일단 비활성화
           sarif-output: 'security-results.sarif'
@@ -46,16 +57,29 @@ jobs:
         with:
           sarif_file: security-results.sarif
 
+      - name: Upload SBOM as Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom
+          path: sbom.json
+          retention-days: 30
+
       - name: Security Scan Summary
         if: always()
         run: |
-          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "## 🛡️ Security Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Findings" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Total Findings | ${{ steps.security.outputs.findings-count }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Critical | ${{ steps.security.outputs.critical-count }} |" >> $GITHUB_STEP_SUMMARY
           echo "| High | ${{ steps.security.outputs.high-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Generated Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- 📄 SARIF: \`${{ steps.security.outputs.sarif-file }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 📦 SBOM: \`${{ steps.security.outputs.sbom-file }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.security.outputs.findings-count }}" != "0" ]; then
             echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
@@ -64,6 +88,53 @@ jobs:
             echo "> [!NOTE]" >> $GITHUB_STEP_SUMMARY
             echo "> No security issues found." >> $GITHUB_STEP_SUMMARY
           fi
+
+  # 컨테이너 이미지 스캔 (빌드 후)
+  container-scan:
+    name: Container Scan
+    runs-on: jhl-space
+    needs: build-test  # 빌드 완료 후 실행
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: security-action:scan-test
+          cache-from: type=gha
+
+      - name: Run Container Scan
+        id: container-scan
+        uses: ./
+        with:
+          # 기본 스캐너 비활성화
+          secret-scan: 'false'
+          code-scan: 'false'
+          dependency-scan: 'false'
+          # 컨테이너 스캔만 활성화
+          container-scan: 'true'
+          container-image: 'security-action:scan-test'
+          # 설정
+          severity-threshold: 'critical'
+          fail-on-findings: 'false'
+          sarif-output: 'container-scan.sarif'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Container Scan Summary
+        if: always()
+        run: |
+          echo "## 🐳 Container Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`security-action:scan-test\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Findings**: ${{ steps.container-scan.outputs.findings-count }}" >> $GITHUB_STEP_SUMMARY
 
   # Docker 이미지 빌드 테스트
   build-test:
