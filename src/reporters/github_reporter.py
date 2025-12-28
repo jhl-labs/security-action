@@ -921,6 +921,8 @@ class GitHubReporter:
     ) -> tuple[str, str]:
         """Check Run conclusion 및 title 결정
 
+        fail_on_findings=False일 경우 failure 대신 neutral 반환
+
         Returns:
             (conclusion, title) 튜플
         """
@@ -937,20 +939,33 @@ class GitHubReporter:
             if sev in severity_counts:
                 severity_counts[sev] += 1
 
-        critical_high = severity_counts["critical"] + severity_counts["high"]
+        # Threshold 이상 카운트
+        threshold_level = self.SEVERITY_ORDER.get(self.severity_threshold, 4)
+        blocking_count = sum(
+            count
+            for sev, count in severity_counts.items()
+            if self.SEVERITY_ORDER.get(sev, 0) >= threshold_level
+        )
 
-        if critical_high > 0:
+        # fail_on_findings=False면 항상 neutral (failure 대신)
+        if not self.fail_on_findings:
+            if blocking_count > 0:
+                return (
+                    "neutral",
+                    f"⚠️ Found {blocking_count} {self.severity_threshold}+ issues (fail disabled)",
+                )
+            return "neutral", f"⚠️ Found {len(findings)} issues (fail disabled)"
+
+        # fail_on_findings=True일 때만 failure 반환
+        if blocking_count > 0:
             return (
                 "failure",
-                f"🔴 Found {critical_high} critical/high issues ({len(findings)} total)",
+                f"🔴 Found {blocking_count} {self.severity_threshold}+ severity issues",
             )
-        elif severity_counts["medium"] > 0:
-            return (
-                "neutral",
-                f"🟡 Found {severity_counts['medium']} medium issues ({len(findings)} total)",
-            )
+        elif len(findings) > 0:
+            return "neutral", f"⚠️ Found {len(findings)} issues (below threshold)"
         else:
-            return "success", f"✅ Found {len(findings)} low/info issues"
+            return "success", "✅ No issues found"
 
     def _generate_scanner_summary(
         self,
