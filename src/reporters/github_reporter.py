@@ -461,12 +461,16 @@ class GitHubReporter:
 
         try:
             commit = self.repo.get_commit(sha)
-            commit.create_status(
-                state=state.value,
-                context=context,
-                description=description[:140],  # GitHub 제한
-                target_url=target_url,
-            )
+            # PyGithub는 target_url=None을 허용하지 않으므로 조건부 전달
+            kwargs = {
+                "state": state.value,
+                "context": context,
+                "description": description[:140],  # GitHub 제한
+            }
+            if target_url:
+                kwargs["target_url"] = target_url
+
+            commit.create_status(**kwargs)
             logger.debug(f"Created commit status: {context} = {state.value}")
             return True
         except GithubException as e:
