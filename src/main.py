@@ -775,6 +775,55 @@ def generate_reports(
         console.print("  [dim]GitHub token not provided, skipping GitHub reporting[/dim]")
 
 
+def print_workflow_annotations(findings: list[dict]) -> None:
+    """GitHub Actions 워크플로우 annotation 출력
+
+    ::error file={path},line={line}::{message}
+    ::warning file={path},line={line}::{message}
+    ::notice file={path},line={line}::{message}
+
+    이 형식으로 출력하면 GitHub Actions UI에서 직접 annotation으로 표시됨
+    """
+    if not findings:
+        return
+
+    # 심각도별 annotation level 매핑
+    level_map = {
+        "critical": "error",
+        "high": "error",
+        "medium": "warning",
+        "low": "notice",
+        "info": "notice",
+    }
+
+    console.print(f"\n[bold cyan]📝 Creating {len(findings)} workflow annotations...[/bold cyan]")
+
+    for finding in findings:
+        severity = finding.get("severity", "medium").lower()
+        level = level_map.get(severity, "warning")
+
+        file_path = finding.get("file_path", "")
+        line_start = finding.get("line_start", 1)
+        line_end = finding.get("line_end") or line_start
+
+        rule_id = finding.get("rule_id", "unknown")
+        scanner = finding.get("scanner", "unknown")
+        message = finding.get("message", "Security issue detected")
+
+        # 메시지 정리 (줄바꿈 제거)
+        clean_message = message.replace("\n", " ").replace("\r", "")
+
+        # GitHub Actions workflow command 출력
+        # 형식: ::{level} file={path},line={line},endLine={endLine},title={title}::{message}
+        annotation = (
+            f"::{level} file={file_path},line={line_start},endLine={line_end},"
+            f"title=[{scanner}] {rule_id}::{clean_message}"
+        )
+        print(annotation)
+
+    console.print(f"  [green]✓[/green] {len(findings)} annotations created")
+
+
 def should_fail(results: list[ScanResult], config: Config) -> bool:
     """취약점 기준으로 실패 여부 판단"""
     if not config.fail_on_findings:
@@ -917,6 +966,9 @@ def main() -> int:
         logger.warning(f"False positive filtering unavailable: {e}")
     except Exception as e:
         logger.error(f"False positive filtering failed: {e}")
+
+    # GitHub Actions 워크플로우 annotation 출력 (UI에 직접 표시)
+    print_workflow_annotations(all_findings)
 
     # SBOM 생성
     if config.sbom_generate:
