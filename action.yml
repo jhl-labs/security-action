@@ -96,6 +96,10 @@ inputs:
     description: '개별 스캐너 Check Run 생성 여부 (기본: false - 통합 Report만 생성)'
     required: false
     default: 'false'
+  post-summary:
+    description: 'GitHub Actions Job Summary 생성 여부 (기본: true)'
+    required: false
+    default: 'true'
   severity-threshold:
     description: '실패 기준 심각도 (critical, high, medium, low)'
     required: false
@@ -165,6 +169,7 @@ runs:
     INPUT_CHECK_NAME: ${{ inputs.check-name }}
     INPUT_SKIP_CHECK: ${{ inputs.skip-check }}
     INPUT_SCANNER_CHECKS: ${{ inputs.scanner-checks }}
+    INPUT_POST_SUMMARY: ${{ inputs.post-summary }}
     INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
     INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
     INPUT_CONFIG_PATH: ${{ inputs.config-path }}

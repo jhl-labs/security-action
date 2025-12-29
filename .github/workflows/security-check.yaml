@@ -68,6 +68,7 @@ jobs:
           check-name: '🛡️ Security Report'
           severity-threshold: 'high'
           fail-on-findings: 'false'
+          post-summary: 'false'  # Summary Job에서 통합 리포트 생성
           sarif-output: 'security-results.sarif'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -150,6 +151,7 @@ jobs:
           skip-check: 'true'  # Required Check 건너뜀 (security-scan에서 생성)
           severity-threshold: 'critical'
           fail-on-findings: 'false'
+          post-summary: 'false'  # Summary Job에서 통합 리포트 생성
           sarif-output: 'container-scan.sarif'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

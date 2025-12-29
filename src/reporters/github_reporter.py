@@ -285,27 +285,40 @@ class GitHubReporter:
         # Summary 생성
         summary = self._generate_required_check_summary(all_findings, scan_results, execution_time)
 
+        # Annotations 생성 (모든 findings에 대해)
+        all_annotations = self._create_annotations(all_findings)
+
         try:
+            # 첫 번째 50개 어노테이션으로 완료
+            first_batch = all_annotations[: self.MAX_ANNOTATIONS_PER_REQUEST]
+
+            output = {
+                "title": title,
+                "summary": summary,
+                "text": self._generate_findings_detail_text(all_findings),
+                "annotations": first_batch,
+            }
+
             if self._required_check:
                 self._required_check.edit(
                     status="completed",
                     conclusion=conclusion.value,
-                    output={
-                        "title": title,
-                        "summary": summary,
-                    },
+                    output=output,
                 )
+                # 50개 초과 시 추가 어노테이션
+                remaining = all_annotations[self.MAX_ANNOTATIONS_PER_REQUEST :]
+                self._add_remaining_annotations(self._required_check, remaining, summary)
             else:
-                self.repo.create_check_run(
+                check_run = self.repo.create_check_run(
                     name=self.check_name,
                     head_sha=sha,
                     status="completed",
                     conclusion=conclusion.value,
-                    output={
-                        "title": title,
-                        "summary": summary,
-                    },
+                    output=output,
                 )
+                # 50개 초과 시 추가 어노테이션
+                remaining = all_annotations[self.MAX_ANNOTATIONS_PER_REQUEST :]
+                self._add_remaining_annotations(check_run, remaining, summary)
 
             logger.info(f"Completed required check: {self.check_name} - {conclusion.value}")
             return True

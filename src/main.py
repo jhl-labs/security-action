@@ -95,6 +95,7 @@ class Config:
     check_name: str = "🛡️ Security Report"
     skip_check: bool = False
     scanner_checks: bool = False  # 개별 스캐너 Check Run 생성 여부
+    post_summary: bool = True  # Job Summary 생성 여부
     severity_threshold: Severity = Severity.HIGH
     fail_on_findings: bool = True
     sarif_output: str = "security-results.sarif"
@@ -136,6 +137,7 @@ class Config:
             check_name=os.getenv("INPUT_CHECK_NAME", "🛡️ Security Report"),
             skip_check=str_to_bool(os.getenv("INPUT_SKIP_CHECK", "false")),
             scanner_checks=str_to_bool(os.getenv("INPUT_SCANNER_CHECKS", "false")),
+            post_summary=str_to_bool(os.getenv("INPUT_POST_SUMMARY", "true")),
             severity_threshold=Severity.from_string(os.getenv("INPUT_SEVERITY_THRESHOLD", "high")),
             fail_on_findings=str_to_bool(os.getenv("INPUT_FAIL_ON_FINDINGS", "true")),
             sarif_output=os.getenv("INPUT_SARIF_OUTPUT", "security-results.sarif"),
@@ -691,9 +693,12 @@ def generate_reports(
                 if ai_review_result and hasattr(ai_review_result, "summary"):
                     ai_summary = ai_review_result.summary
 
-                # Job Summary 생성
-                github.post_summary(all_findings, scan_results, ai_summary)
-                console.print("  [green]✓[/green] GitHub Actions summary posted")
+                # Job Summary 생성 (post_summary=true인 경우만)
+                if config.post_summary:
+                    github.post_summary(all_findings, scan_results, ai_summary)
+                    console.print("  [green]✓[/green] GitHub Actions summary posted")
+                else:
+                    console.print("  [dim]Job summary skipped (post-summary=false)[/dim]")
 
                 # PR 컨텍스트에서 코멘트/리뷰 생성
                 if github.is_pr_context():
