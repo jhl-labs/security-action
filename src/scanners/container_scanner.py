@@ -115,7 +115,8 @@ class ContainerScanner(BaseScanner):
         # 이미지 스캔 결과
         results = data.get("Results", [])
         for result in results:
-            target = self.normalize_path(result.get("Target", ""))
+            raw_target = result.get("Target", "")
+            target = self._normalize_container_target(raw_target)
 
             # 취약점
             for vuln in result.get("Vulnerabilities", []):
@@ -126,6 +127,37 @@ class ContainerScanner(BaseScanner):
                 findings.append(self._convert_misconfig(misconfig, target))
 
         return [f for f in findings if f is not None]
+
+    def _normalize_container_target(self, target: str) -> str:
+        """컨테이너 타겟 경로 정규화
+
+        Trivy가 반환하는 Target은 다음과 같은 형태:
+        - 이미지: "nginx:latest (debian 12.8)" 또는 "security-action:scan"
+        - 파일시스템: "/path/to/file"
+
+        GitHub SARIF는 유효한 파일 경로 또는 상대 경로를 기대하므로,
+        이미지 이름 형식의 경우 Dockerfile로 대체하거나 메타데이터로 저장
+        """
+        if not target:
+            return "Dockerfile"
+
+        # 파일 경로인 경우 (슬래시로 시작하거나 상대 경로)
+        if "/" in target and ":" not in target.split("/")[0]:
+            return self.normalize_path(target)
+
+        # 이미지 이름인 경우 (예: nginx:latest, security-action:scan)
+        # 괄호 안의 OS 정보 제거
+        if " (" in target:
+            target = target.split(" (")[0]
+
+        # Dockerfile이 있으면 Dockerfile 사용, 없으면 이미지 이름에서 안전한 경로 생성
+        dockerfile = Path(self.workspace) / "Dockerfile"
+        if dockerfile.exists():
+            return "Dockerfile"
+
+        # 이미지 이름을 안전한 파일명으로 변환 (: -> -, / -> -)
+        safe_name = target.replace(":", "-").replace("/", "-")
+        return f"container-image/{safe_name}"
 
     def _convert_vulnerability(self, vuln: dict, target: str) -> Finding:
         """취약점을 Finding으로 변환"""
