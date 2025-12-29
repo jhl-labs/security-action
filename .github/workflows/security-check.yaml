@@ -38,34 +38,62 @@ jobs:
         id: scan
         uses: ./
         with:
+          # 기본 스캐너 (모두 활성화)
           secret-scan: 'true'
           secret-scan-history: 'true'
           code-scan: 'true'
           dependency-scan: 'true'
+
+          # IaC 스캔 (프레임워크 명시)
           iac-scan: 'true'
+          iac-frameworks: 'dockerfile,github_actions,kubernetes'
+
+          # SBOM 생성
           sbom-generate: 'true'
           sbom-format: 'cyclonedx-json'
           sbom-output: 'sbom.json'
+
+          # SonarQube (서버 필요 - 비활성화)
+          # sonar-scan: 'true'
+          # sonar-host-url: ${{ secrets.SONAR_HOST_URL }}
+          # sonar-token: ${{ secrets.SONAR_TOKEN }}
+          # sonar-project-key: 'security-action'
+
+          # AI 리뷰 (API 키 필요 - 비활성화)
+          # ai-review: 'true'
+          # openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          # 공통 설정
           check-name: '🛡️ Security Report'
           severity-threshold: 'high'
           fail-on-findings: 'false'
           sarif-output: 'security-results.sarif'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload SARIF
+      - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
         if: always()
         continue-on-error: true
         with:
           sarif_file: security-results.sarif
+          category: security-scan
 
-      - name: Upload SBOM
+      - name: Upload SBOM Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sbom
+          name: sbom-source
           path: sbom.json
-          retention-days: 30
+          retention-days: 90
+
+      - name: Upload SARIF Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sarif-security
+          path: security-results.sarif
+          retention-days: 90
 
     outputs:
       findings-count: ${{ steps.scan.outputs.findings-count }}
@@ -80,6 +108,7 @@ jobs:
     needs: build
     permissions:
       contents: read
+      security-events: write
       checks: write
       statuses: write
 
@@ -90,7 +119,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Image
+      - name: Build Image for Scan
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -103,19 +132,55 @@ jobs:
         id: scan
         uses: ./
         with:
+          # 기본 스캐너 비활성화 (security-scan에서 처리)
           secret-scan: 'false'
           code-scan: 'false'
           dependency-scan: 'false'
+
+          # 컨테이너 스캔 활성화
           container-scan: 'true'
           container-image: 'security-action:scan'
-          skip-check: 'true'  # 🐳 Container Scan 체크만 생성 (Required Check 건너뜀)
+
+          # 컨테이너 SBOM 생성
+          sbom-generate: 'true'
+          sbom-format: 'cyclonedx-json'
+          sbom-output: 'container-sbom.json'
+
+          # 공통 설정
+          skip-check: 'true'  # Required Check 건너뜀 (security-scan에서 생성)
           severity-threshold: 'critical'
           fail-on-findings: 'false'
           sarif-output: 'container-scan.sarif'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload Container SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: container-scan.sarif
+          category: container-scan
+
+      - name: Upload Container SBOM Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom-container
+          path: container-sbom.json
+          retention-days: 90
+
+      - name: Upload Container SARIF Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sarif-container
+          path: container-scan.sarif
+          retention-days: 90
+
     outputs:
       findings-count: ${{ steps.scan.outputs.findings-count }}
+      critical-count: ${{ steps.scan.outputs.critical-count }}
+      high-count: ${{ steps.scan.outputs.high-count }}
 
   # ─────────────────────────────────────────────────────────────────────────
   # 🔧 Build & Lint Jobs
@@ -160,43 +225,53 @@ jobs:
   summary:
     name: 📊 Summary
     runs-on: jhl-space
-    needs: [security-scan, container-scan]
+    needs: [security-scan, container-scan, build, lint]
     if: always()
 
     steps:
       - name: Generate Security Report
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          # 🛡️ Security Report
+          # 🛡️ Security Scan Report
 
-          ## Overview
-          | Scan Type | Findings |
-          |-----------|----------|
-          | Code & Dependencies | ${{ needs.security-scan.outputs.findings-count || 'N/A' }} |
-          | Container Image | ${{ needs.container-scan.outputs.findings-count || 'N/A' }} |
+          ## 📈 Overview
+          | Scan Type | Findings | Critical | High |
+          |-----------|----------|----------|------|
+          | 🔍 Code & Dependencies | ${{ needs.security-scan.outputs.findings-count || 'N/A' }} | ${{ needs.security-scan.outputs.critical-count || '0' }} | ${{ needs.security-scan.outputs.high-count || '0' }} |
+          | 🐳 Container Image | ${{ needs.container-scan.outputs.findings-count || 'N/A' }} | ${{ needs.container-scan.outputs.critical-count || '0' }} | ${{ needs.container-scan.outputs.high-count || '0' }} |
 
-          ## Severity Breakdown
-          | Level | Count |
-          |-------|-------|
-          | 🔴 Critical | ${{ needs.security-scan.outputs.critical-count || '0' }} |
-          | 🟠 High | ${{ needs.security-scan.outputs.high-count || '0' }} |
+          ## 🛡️ Enabled Scanners
+          | Scanner | Tool | Status |
+          |---------|------|--------|
+          | 🔐 Secret Scan | Gitleaks | ✅ Enabled (with history) |
+          | 🔍 Code Scan (SAST) | Semgrep | ✅ Enabled |
+          | 📦 Dependency Scan (SCA) | Trivy | ✅ Enabled |
+          | 🏗️ IaC Scan | Checkov | ✅ Enabled |
+          | 🐳 Container Scan | Trivy | ✅ Enabled |
+          | 📋 SBOM Generation | Syft | ✅ Enabled |
+          | 🔬 SonarQube | SonarQube | ⏸️ Disabled (requires server) |
+          | 🤖 AI Review | LangGraph | ⏸️ Disabled (requires API key) |
 
-          ## Check Runs
-          | Check | Description |
-          |-------|-------------|
-          | 🛡️ Security Report | Required status check for branch protection |
-          | 🔐 Secret Scan | Hardcoded secrets detection |
-          | 🔍 Code Scan | Static analysis (SAST) |
-          | 📦 Dependency Scan | Vulnerability scan (SCA) |
-          | 🏗️ IaC Scan | Infrastructure as Code |
-          | 🐳 Container Scan | Container image vulnerabilities |
+          ## 📦 Artifacts
+          | Type | File | Description |
+          |------|------|-------------|
+          | SARIF | `security-results.sarif` | Static analysis results (GitHub Security 탭) |
+          | SARIF | `container-scan.sarif` | Container vulnerabilities |
+          | SBOM | `sbom.json` | Source code dependencies (CycloneDX) |
+          | SBOM | `container-sbom.json` | Container image components |
 
-          ## Artifacts
-          | Type | File |
-          |------|------|
-          | SARIF | `${{ needs.security-scan.outputs.sarif-file || 'security-results.sarif' }}` |
-          | SBOM | `${{ needs.security-scan.outputs.sbom-file || 'sbom.json' }}` |
+          ## 🔧 Build Status
+          | Job | Status |
+          |-----|--------|
+          | 🔧 Build | ${{ needs.build.result }} |
+          | 🔧 Lint | ${{ needs.lint.result }} |
 
           ---
-          > **Branch Protection**: Add `🛡️ Security Report` as required status check
+
+          ### 📖 Quick Reference
+          - **SARIF**: GitHub Security 탭에서 취약점 상세 확인
+          - **SBOM**: 소프트웨어 구성요소 목록 (공급망 보안)
+          - **Branch Protection**: `🛡️ Security Report`를 Required Status Check로 설정
+
+          > 💡 SonarQube, AI Review 활성화는 [README.md](../../README.md) 참고
           EOF
