@@ -1,4 +1,4 @@
-name: Security Self-Check
+name: Security Check
 
 on:
   push:
@@ -6,66 +6,60 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # 매주 월요일 오전 9시 (KST) = 일요일 자정 (UTC)
-    - cron: '0 0 * * 0'
-  workflow_dispatch:  # 수동 실행 허용
+    - cron: '0 0 * * 0'  # 매주 일요일 자정 (UTC)
+  workflow_dispatch:
 
 # =============================================================================
-# GHAS 스타일 보안 스캔
-# - "Security scan results" 체크를 브랜치 보호 규칙에 추가하여 PR 머지 제어
-# - Settings → Branches → Branch protection rules에서 설정
+# 🛡️ Security Report - Required Status Check
+# Settings → Branches → Branch protection rules → "🛡️ Security Report"
 # =============================================================================
 
 jobs:
-  # 기본 보안 스캔 (GHAS 대체)
+  # ─────────────────────────────────────────────────────────────────────────
+  # 🛡️ Security Jobs
+  # ─────────────────────────────────────────────────────────────────────────
   security-scan:
-    name: Security Scan
+    name: 🛡️ Security Scan
     runs-on: jhl-space
     permissions:
       contents: read
-      security-events: write  # SARIF 업로드
-      pull-requests: write    # PR 코멘트
-      checks: write           # Check Run 생성 (GHAS 스타일)
-      statuses: write         # Commit Status API
+      security-events: write
+      pull-requests: write
+      checks: write
+      statuses: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 전체 히스토리 (secret scanning에 필요)
+          fetch-depth: 0
 
-      - name: Run Security Scan (Self-Check)
-        id: security
-        uses: ./  # 자기 자신을 사용
+      - name: Run Security Scan
+        id: scan
+        uses: ./
         with:
-          # 기본 스캐너
           secret-scan: 'true'
-          secret-scan-history: 'true'  # Git history 전체 스캔
+          secret-scan-history: 'true'
           code-scan: 'true'
           dependency-scan: 'true'
-          # 추가 스캐너
-          iac-scan: 'true'  # Dockerfile, GitHub Actions 스캔
-          # SonarQube/AI는 비활성화
-          sonar-scan: 'false'
-          ai-review: 'false'
-          # SBOM 생성
+          iac-scan: 'true'
           sbom-generate: 'true'
           sbom-format: 'cyclonedx-json'
           sbom-output: 'sbom.json'
-          # 공통 설정
+          check-name: '🛡️ Security Report'
           severity-threshold: 'high'
-          fail-on-findings: 'false'  # 테스트 픽스처 때문에 일단 비활성화
+          fail-on-findings: 'false'
           sarif-output: 'security-results.sarif'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload SARIF to GitHub Security
+      - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v4
         if: always()
-        continue-on-error: true  # private repo에서는 실패할 수 있음
+        continue-on-error: true
         with:
           sarif_file: security-results.sarif
 
-      - name: Upload SBOM as Artifact
+      - name: Upload SBOM
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -73,123 +67,70 @@ jobs:
           path: sbom.json
           retention-days: 30
 
-      - name: Security Scan Summary
-        if: always()
-        run: |
-          echo "## 🛡️ Security Scan Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Check Runs Created (GHAS-Style)" >> $GITHUB_STEP_SUMMARY
-          echo "| Check Run | Description |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Security scan results** | Required status check for branch protection |" >> $GITHUB_STEP_SUMMARY
-          echo "| **🔐 Secret Scan** | Scans for hardcoded secrets (Gitleaks) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **🔍 Code Scan** | Static analysis for vulnerabilities (Semgrep) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **📦 Dependency Scan** | Dependency vulnerability scan (Trivy) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **🏗️ IaC Scan** | Infrastructure as Code scan (Checkov) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Findings" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 Critical | ${{ steps.security.outputs.critical-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 High | ${{ steps.security.outputs.high-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Total** | **${{ steps.security.outputs.findings-count }}** |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "| Type | File |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 📄 SARIF | \`${{ steps.security.outputs.sarif-file }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 📦 SBOM | \`${{ steps.security.outputs.sbom-file }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Branch Protection Setup" >> $GITHUB_STEP_SUMMARY
-          echo "Add \`Security scan results\` as required status check:" >> $GITHUB_STEP_SUMMARY
-          echo "\`Settings → Branches → Add rule → Require status checks\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.security.outputs.findings-count }}" != "0" ]; then
-            echo "> [!WARNING]" >> $GITHUB_STEP_SUMMARY
-            echo "> Security issues were found. Review the **Security scan results** check for details." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "> [!NOTE]" >> $GITHUB_STEP_SUMMARY
-            echo "> No security issues found. All checks passed." >> $GITHUB_STEP_SUMMARY
-          fi
+    outputs:
+      findings-count: ${{ steps.scan.outputs.findings-count }}
+      critical-count: ${{ steps.scan.outputs.critical-count }}
+      high-count: ${{ steps.scan.outputs.high-count }}
+      sarif-file: ${{ steps.scan.outputs.sarif-file }}
+      sbom-file: ${{ steps.scan.outputs.sbom-file }}
 
-  # 컨테이너 이미지 스캔 (빌드 후)
-  # Note: build-test job이 완료된 후에만 실행됨
-  # build-test가 실패하면 이 job은 건너뛰어짐 (skipped)
   container-scan:
-    name: Container Scan
+    name: 🛡️ Container Scan
     runs-on: jhl-space
-    needs: build-test  # 빌드 완료 후 실행 (의존성)
+    needs: build
     permissions:
       contents: read
       checks: write
       statuses: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image for scanning
+      - name: Build Image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
           load: true
-          tags: security-action:scan-test
+          tags: security-action:scan
           cache-from: type=gha
 
       - name: Run Container Scan
-        id: container-scan
+        id: scan
         uses: ./
         with:
-          # 기본 스캐너 비활성화
           secret-scan: 'false'
           code-scan: 'false'
           dependency-scan: 'false'
-          # 컨테이너 스캔만 활성화
           container-scan: 'true'
-          container-image: 'security-action:scan-test'
-          # 설정
-          check-name: 'Container security scan'  # 별도 Required Check 이름
+          container-image: 'security-action:scan'
+          skip-check: 'true'  # 🐳 Container Scan 체크만 생성 (Required Check 건너뜀)
           severity-threshold: 'critical'
           fail-on-findings: 'false'
           sarif-output: 'container-scan.sarif'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Container Scan Summary
-        if: always()
-        run: |
-          echo "## 🐳 Container Scan Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Check Runs Created" >> $GITHUB_STEP_SUMMARY
-          echo "| Check Run | Description |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Container security scan** | Required status check for container vulnerabilities |" >> $GITHUB_STEP_SUMMARY
-          echo "| **🐳 Container Scan** | Detailed container image scan results |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Results" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Image | \`security-action:scan-test\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Findings | ${{ steps.container-scan.outputs.findings-count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Threshold | critical |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> **Note**: This job runs after \`build-test\` completes." >> $GITHUB_STEP_SUMMARY
+    outputs:
+      findings-count: ${{ steps.scan.outputs.findings-count }}
 
-  # Docker 이미지 빌드 테스트
-  build-test:
-    name: Build Test
+  # ─────────────────────────────────────────────────────────────────────────
+  # 🔧 Build & Lint Jobs
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: 🔧 Build
     runs-on: jhl-space
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Build Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -198,20 +139,64 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Python 린팅 (Docker로 실행)
   lint:
-    name: Lint & Type Check
+    name: 🔧 Lint
     runs-on: jhl-space
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Ruff in Docker
+      - name: Run Ruff
         run: |
           docker run --rm -v $(pwd):/app -w /app python:3.11-slim sh -c "
-            pip install -q ruff mypy pydantic pydantic-settings httpx PyYAML 'rich>=13.5.0,<14.0.0' &&
-            echo '=== Ruff Lint ===' &&
+            pip install -q ruff &&
             ruff check src/ &&
-            echo '=== Ruff Format ===' &&
             ruff format --check src/
           "
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 📊 Summary Job (통합 리포트)
+  # ─────────────────────────────────────────────────────────────────────────
+  summary:
+    name: 📊 Summary
+    runs-on: jhl-space
+    needs: [security-scan, container-scan]
+    if: always()
+
+    steps:
+      - name: Generate Security Report
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          # 🛡️ Security Report
+
+          ## Overview
+          | Scan Type | Findings |
+          |-----------|----------|
+          | Code & Dependencies | ${{ needs.security-scan.outputs.findings-count || 'N/A' }} |
+          | Container Image | ${{ needs.container-scan.outputs.findings-count || 'N/A' }} |
+
+          ## Severity Breakdown
+          | Level | Count |
+          |-------|-------|
+          | 🔴 Critical | ${{ needs.security-scan.outputs.critical-count || '0' }} |
+          | 🟠 High | ${{ needs.security-scan.outputs.high-count || '0' }} |
+
+          ## Check Runs
+          | Check | Description |
+          |-------|-------------|
+          | 🛡️ Security Report | Required status check for branch protection |
+          | 🔐 Secret Scan | Hardcoded secrets detection |
+          | 🔍 Code Scan | Static analysis (SAST) |
+          | 📦 Dependency Scan | Vulnerability scan (SCA) |
+          | 🏗️ IaC Scan | Infrastructure as Code |
+          | 🐳 Container Scan | Container image vulnerabilities |
+
+          ## Artifacts
+          | Type | File |
+          |------|------|
+          | SARIF | `${{ needs.security-scan.outputs.sarif-file || 'security-results.sarif' }}` |
+          | SBOM | `${{ needs.security-scan.outputs.sbom-file || 'sbom.json' }}` |
+
+          ---
+          > **Branch Protection**: Add `🛡️ Security Report` as required status check
+          EOF

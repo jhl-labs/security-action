@@ -85,9 +85,13 @@ inputs:
 
   # 공통 설정
   check-name:
-    description: 'Required Status Check 이름 (기본: Security scan results)'
+    description: 'Required Status Check 이름 (기본: 🛡️ Security Report)'
     required: false
-    default: 'Security scan results'
+    default: '🛡️ Security Report'
+  skip-check:
+    description: 'Required Status Check 생성 건너뛰기 (개별 스캐너 체크만 생성)'
+    required: false
+    default: 'false'
   severity-threshold:
     description: '실패 기준 심각도 (critical, high, medium, low)'
     required: false
@@ -155,6 +159,7 @@ runs:
     INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
     # 공통
     INPUT_CHECK_NAME: ${{ inputs.check-name }}
+    INPUT_SKIP_CHECK: ${{ inputs.skip-check }}
     INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
     INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
     INPUT_CONFIG_PATH: ${{ inputs.config-path }}

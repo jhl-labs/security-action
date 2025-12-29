@@ -92,7 +92,8 @@ class Config:
     # AI 리뷰
     ai_review: bool = False
     # 공통
-    check_name: str = "Security scan results"
+    check_name: str = "🛡️ Security Report"
+    skip_check: bool = False
     severity_threshold: Severity = Severity.HIGH
     fail_on_findings: bool = True
     sarif_output: str = "security-results.sarif"
@@ -131,7 +132,8 @@ class Config:
             # AI 리뷰
             ai_review=str_to_bool(os.getenv("INPUT_AI_REVIEW", "false")),
             # 공통
-            check_name=os.getenv("INPUT_CHECK_NAME", "Security scan results"),
+            check_name=os.getenv("INPUT_CHECK_NAME", "🛡️ Security Report"),
+            skip_check=str_to_bool(os.getenv("INPUT_SKIP_CHECK", "false")),
             severity_threshold=Severity.from_string(os.getenv("INPUT_SEVERITY_THRESHOLD", "high")),
             fail_on_findings=str_to_bool(os.getenv("INPUT_FAIL_ON_FINDINGS", "true")),
             sarif_output=os.getenv("INPUT_SARIF_OUTPUT", "security-results.sarif"),
@@ -786,10 +788,12 @@ def main() -> int:
             )
             if github_reporter.is_available():
                 console.print("[green]✓[/green] GitHub Check Run integration enabled")
-                console.print(f"  Required check: {github_reporter.check_name}")
-
-                # Required Status Check 시작 (GHAS 스타일)
-                github_reporter.start_required_check()
+                if config.skip_check:
+                    console.print("  [dim]Required check: skipped[/dim]")
+                else:
+                    console.print(f"  Required check: {github_reporter.check_name}")
+                    # Required Status Check 시작 (GHAS 스타일)
+                    github_reporter.start_required_check()
             else:
                 console.print("[dim]GitHub API available but no repo context[/dim]")
         except Exception as e:
@@ -907,29 +911,32 @@ def main() -> int:
 
     # Required Status Check 완료 (GHAS 스타일)
     if github_reporter and github_reporter.is_available():
-        # 스캔 결과를 summary 형태로 변환
-        scan_summary = []
-        for r in results:
-            scan_summary.append(
-                {
-                    "scanner": r.scanner,
-                    "success": r.success,
-                    "findings_count": len(r.findings),
-                    "time": f"{r.execution_time:.2f}s",
-                }
+        if not config.skip_check:
+            # 스캔 결과를 summary 형태로 변환
+            scan_summary = []
+            for r in results:
+                scan_summary.append(
+                    {
+                        "scanner": r.scanner,
+                        "success": r.success,
+                        "findings_count": len(r.findings),
+                        "time": f"{r.execution_time:.2f}s",
+                    }
+                )
+
+            # Required Check 완료
+            github_reporter.complete_required_check(
+                all_findings=all_findings,
+                scan_results=scan_summary,
+                execution_time=total_execution_time,
             )
 
-        # Required Check 완료
-        github_reporter.complete_required_check(
-            all_findings=all_findings,
-            scan_results=scan_summary,
-            execution_time=total_execution_time,
-        )
+            # 전체 Commit Status 생성
+            github_reporter.create_overall_status(all_findings)
 
-        # 전체 Commit Status 생성
-        github_reporter.create_overall_status(all_findings)
-
-        console.print(f"\n[green]✓[/green] GitHub Check completed: {github_reporter.check_name}")
+            console.print(
+                f"\n[green]✓[/green] GitHub Check completed: {github_reporter.check_name}"
+            )
 
     # 실패 여부 판단
     if should_fail(results, config):
