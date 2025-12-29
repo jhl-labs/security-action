@@ -198,10 +198,8 @@ class IaCScanner(BaseScanner):
 
         severity = self.SEVERITY_MAP.get(severity_str.upper(), Severity.MEDIUM)
 
-        # 파일 경로 정규화
-        file_path = check.get("file_path", "")
-        if file_path.startswith("/"):
-            file_path = file_path[1:]
+        # 파일 경로 정규화 (Docker 컨테이너 경로 제거)
+        file_path = self.normalize_path(check.get("file_path", ""))
 
         # 라인 정보
         file_line_range = check.get("file_line_range", [1, 1])

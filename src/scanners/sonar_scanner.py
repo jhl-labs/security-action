@@ -250,9 +250,10 @@ class SonarScanner(BaseScanner):
             Severity.MEDIUM,
         )
 
-        # 컴포넌트에서 파일 경로 추출
+        # 컴포넌트에서 파일 경로 추출 및 정규화
         component = issue.get("component", "")
         file_path = component.split(":")[-1] if ":" in component else component
+        file_path = self.normalize_path(file_path)
 
         # 텍스트 범위
         text_range = issue.get("textRange", {})
@@ -287,8 +288,10 @@ class SonarScanner(BaseScanner):
         }
         severity = severity_map.get(vulnerability_probability, Severity.MEDIUM)
 
+        # 컴포넌트에서 파일 경로 추출 및 정규화
         component = hotspot.get("component", "")
         file_path = component.split(":")[-1] if ":" in component else component
+        file_path = self.normalize_path(file_path)
 
         return Finding(
             scanner=self.name,

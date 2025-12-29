@@ -115,7 +115,7 @@ class ContainerScanner(BaseScanner):
         # 이미지 스캔 결과
         results = data.get("Results", [])
         for result in results:
-            target = result.get("Target", "")
+            target = self.normalize_path(result.get("Target", ""))
 
             # 취약점
             for vuln in result.get("Vulnerabilities", []):

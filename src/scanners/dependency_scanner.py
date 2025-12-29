@@ -52,7 +52,7 @@ class DependencyScanner(BaseScanner):
                     data = json.load(f)
 
                 for result_item in data.get("Results", []):
-                    target = result_item.get("Target", "")
+                    target = self.normalize_path(result_item.get("Target", ""))
                     vulnerabilities = result_item.get("Vulnerabilities", []) or []
 
                     for vuln in vulnerabilities:

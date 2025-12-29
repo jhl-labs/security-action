@@ -58,7 +58,7 @@ class CodeScanner(BaseScanner):
                         rule_id=item.get("check_id", "unknown"),
                         severity=self._map_severity(extra.get("severity", "INFO")),
                         message=extra.get("message", "Security issue detected"),
-                        file_path=item.get("path", ""),
+                        file_path=self.normalize_path(item.get("path", "")),
                         line_start=item.get("start", {}).get("line", 0),
                         line_end=item.get("end", {}).get("line"),
                         code_snippet=extra.get("lines", ""),

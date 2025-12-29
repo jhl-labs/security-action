@@ -97,7 +97,7 @@ class SecretScanner(BaseScanner):
                         rule_id=item.get("RuleID", "unknown"),
                         severity=self._map_severity(item.get("RuleID", "")),
                         message=item.get("Description", "Secret detected"),
-                        file_path=item.get("File", ""),
+                        file_path=self.normalize_path(item.get("File", "")),
                         line_start=item.get("StartLine", 0),
                         line_end=item.get("EndLine"),
                         code_snippet=self._mask_secret(item.get("Secret", "")),

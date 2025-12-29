@@ -59,8 +59,49 @@ class ScanResult:
 class BaseScanner(ABC):
     """스캐너 기본 클래스"""
 
+    # GitHub Actions Docker 컨테이너 내 워크스페이스 경로들
+    WORKSPACE_PREFIXES = [
+        "/github/workspace/",
+        "/github/workspace",
+        "/home/runner/work/",
+    ]
+
     def __init__(self, workspace: str):
         self.workspace = workspace
+
+    def normalize_path(self, file_path: str) -> str:
+        """파일 경로 정규화 - Docker 컨테이너 경로를 상대 경로로 변환
+
+        GitHub Actions에서 Docker 컨테이너로 실행 시 스캐너가 반환하는 경로가
+        /github/workspace/... 형태로 되어 있어 GitHub UI에서 파일을 찾지 못함.
+        이 메서드는 해당 prefix를 제거하여 상대 경로로 변환함.
+
+        Args:
+            file_path: 원본 파일 경로
+
+        Returns:
+            상대 경로로 변환된 파일 경로
+        """
+        if not file_path:
+            return file_path
+
+        # Docker 컨테이너 경로 prefix 제거
+        for prefix in self.WORKSPACE_PREFIXES:
+            if file_path.startswith(prefix):
+                file_path = file_path[len(prefix) :]
+                break
+
+        # workspace 경로도 제거 (예: /home/vtopia/git/... 등)
+        if self.workspace and file_path.startswith(self.workspace):
+            file_path = file_path[len(self.workspace) :]
+            if file_path.startswith("/"):
+                file_path = file_path[1:]
+
+        # 선행 슬래시 제거
+        while file_path.startswith("/"):
+            file_path = file_path[1:]
+
+        return file_path
 
     @property
     @abstractmethod
