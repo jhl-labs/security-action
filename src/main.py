@@ -94,6 +94,7 @@ class Config:
     # 공통
     check_name: str = "🛡️ Security Report"
     skip_check: bool = False
+    scanner_checks: bool = False  # 개별 스캐너 Check Run 생성 여부
     severity_threshold: Severity = Severity.HIGH
     fail_on_findings: bool = True
     sarif_output: str = "security-results.sarif"
@@ -134,6 +135,7 @@ class Config:
             # 공통
             check_name=os.getenv("INPUT_CHECK_NAME", "🛡️ Security Report"),
             skip_check=str_to_bool(os.getenv("INPUT_SKIP_CHECK", "false")),
+            scanner_checks=str_to_bool(os.getenv("INPUT_SCANNER_CHECKS", "false")),
             severity_threshold=Severity.from_string(os.getenv("INPUT_SEVERITY_THRESHOLD", "high")),
             fail_on_findings=str_to_bool(os.getenv("INPUT_FAIL_ON_FINDINGS", "true")),
             sarif_output=os.getenv("INPUT_SARIF_OUTPUT", "security-results.sarif"),
@@ -318,6 +320,9 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
 
     console.print(f"[dim]Scanning directory: {workspace}[/dim]\n")
 
+    # 개별 스캐너 Check Run 생성 여부
+    create_scanner_checks = config.scanner_checks
+
     # 스캐너 설정 목록: (이름, 모듈명, 클래스명, 아이콘, 추가설정)
     scanners_to_run: list[tuple] = []
 
@@ -355,8 +360,8 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
     for scanner_name, module_name, class_name, icon, extra_config in scanners_to_run:
         console.print(f"[bold cyan]{icon} Running {scanner_name}...[/bold cyan]")
 
-        # Check Run 시작 (in_progress 상태)
-        if github_reporter and github_reporter.is_available():
+        # 개별 스캐너 Check Run 시작 (scanner_checks=true인 경우만)
+        if create_scanner_checks and github_reporter and github_reporter.is_available():
             github_reporter.start_scanner_check(scanner_name)
 
         # 스캐너 동적 로드 및 실행
@@ -367,8 +372,8 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
             result = scanner.scan()
             results.append(result)
 
-            # Check Run 완료
-            if github_reporter and github_reporter.is_available():
+            # 개별 스캐너 Check Run 완료 (scanner_checks=true인 경우만)
+            if create_scanner_checks and github_reporter and github_reporter.is_available():
                 findings_dict = [
                     {
                         "scanner": f.scanner,
@@ -391,11 +396,19 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
                     error=result.error if not result.success else None,
                 )
                 console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+            else:
+                # 개별 Check Run 없이 결과만 출력
+                status = "✓" if result.success else "✗"
+                color = "green" if result.success else "red"
+                console.print(
+                    f"  [{color}]{status}[/{color}] {len(result.findings)} findings "
+                    f"({result.execution_time:.2f}s)"
+                )
 
         except Exception as e:
             console.print(f"[red]Error running {scanner_name}: {e}[/red]")
-            # 에러 발생 시 Check Run 실패로 완료
-            if github_reporter and github_reporter.is_available():
+            # 에러 발생 시 Check Run 실패로 완료 (scanner_checks=true인 경우만)
+            if create_scanner_checks and github_reporter and github_reporter.is_available():
                 github_reporter.complete_scanner_check(
                     scanner=scanner_name,
                     findings=[],
@@ -450,8 +463,9 @@ def run_ai_review(
 
     console.print(f"[dim]Reviewing {len(all_findings)} finding(s)...[/dim]")
 
-    # AI Review Check Run 시작
-    if github_reporter and github_reporter.is_available():
+    # AI Review Check Run 시작 (scanner_checks=true인 경우만)
+    create_scanner_checks = config.scanner_checks
+    if create_scanner_checks and github_reporter and github_reporter.is_available():
         github_reporter.start_ai_review_check()
 
     start_time = time.time()
@@ -469,8 +483,8 @@ def run_ai_review(
 
         if state.error:
             console.print(f"[red]AI Review error: {state.error}[/red]")
-            # Check Run 실패로 완료
-            if github_reporter and github_reporter.is_available():
+            # Check Run 실패로 완료 (scanner_checks=true인 경우만)
+            if create_scanner_checks and github_reporter and github_reporter.is_available():
                 github_reporter.complete_ai_review_check(
                     reviews=[],
                     error=state.error,
@@ -481,8 +495,8 @@ def run_ai_review(
         # 결과 출력
         print_ai_review_results(state)
 
-        # AI Review Check Run 완료
-        if github_reporter and github_reporter.is_available():
+        # AI Review Check Run 완료 (scanner_checks=true인 경우만)
+        if create_scanner_checks and github_reporter and github_reporter.is_available():
             reviews_dict = []
             if hasattr(state, "reviews") and state.reviews:
                 for review in state.reviews:
@@ -524,7 +538,7 @@ def run_ai_review(
     except ImportError as e:
         execution_time = time.time() - start_time
         console.print(f"[yellow]AI Review dependencies not available: {e}[/yellow]")
-        if github_reporter and github_reporter.is_available():
+        if create_scanner_checks and github_reporter and github_reporter.is_available():
             github_reporter.complete_ai_review_check(
                 reviews=[],
                 error=f"Dependencies not available: {e}",
@@ -534,7 +548,7 @@ def run_ai_review(
     except Exception as e:
         execution_time = time.time() - start_time
         console.print(f"[red]AI Review failed: {e}[/red]")
-        if github_reporter and github_reporter.is_available():
+        if create_scanner_checks and github_reporter and github_reporter.is_available():
             github_reporter.complete_ai_review_check(
                 reviews=[],
                 error=str(e),
@@ -770,6 +784,7 @@ def main() -> int:
     console.print(f"  SBOM Generate: {config.sbom_generate}")
     console.print(f"  AI Review: {config.ai_review}")
     console.print(f"  Severity Threshold: {config.severity_threshold.value}")
+    console.print(f"  Scanner Checks: {config.scanner_checks}")
     console.print()
 
     # GitHub Reporter 초기화 (GHAS 스타일 Check Run 관리)
