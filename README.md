@@ -606,3 +606,230 @@ dependency-scan: 'false'  # 비활성화
 - [Trivy 문서](https://aquasecurity.github.io/trivy/)
 - [SonarQube 문서](https://docs.sonarsource.com/sonarqube/)
 - [LangGraph 문서](https://langchain-ai.github.io/langgraph/)
+
+---
+
+## 부록 (Appendix)
+
+### 부록 A: 보안 스캔 도구 상세
+
+보안을 처음 접하는 개발자를 위해 각 도구의 역할과 작동 방식을 상세히 설명합니다.
+
+#### 1. Gitleaks (Secret Scanner)
+
+**목적**: Git 저장소에서 API 키, 비밀번호, 토큰 등 민감 정보를 탐지합니다.
+
+**작동 방식**:
+- 정규표현식 기반 패턴 매칭
+- 엔트로피 분석 (무작위 문자열 탐지)
+- Git 히스토리 전체 검사 가능 (과거 커밋에서 삭제된 시크릿도 탐지)
+
+**탐지 대상 예시**:
+- AWS Access Key / Secret Key
+- GitHub Personal Access Token
+- Slack Webhook URL
+- RSA/SSH 개인키
+- 데이터베이스 비밀번호 패턴
+
+**왜 중요한가?**
+- 실수로 커밋된 비밀키가 GitHub에 공개되면 수 분 내에 해커에게 발견됩니다
+- 삭제해도 Git 히스토리에 남아있어 여전히 노출됩니다
+- AWS 키 유출 시 수백만원의 요금 폭탄 사례가 실제로 발생합니다
+
+#### 2. Semgrep (Code Scanner / SAST)
+
+**목적**: 소스코드의 보안 취약점 및 버그를 실행 없이 탐지합니다.
+
+**작동 방식**:
+- AST(추상 구문 트리) 기반 의미론적 패턴 매칭
+- 단순 텍스트 검색이 아닌 코드 구조를 이해
+- 2,000개 이상의 사전 정의된 규칙 제공
+
+**탐지 대상 예시**:
+- SQL Injection (`"SELECT * FROM users WHERE id = " + user_input`)
+- XSS (Cross-Site Scripting)
+- 하드코딩된 자격증명
+- 안전하지 않은 역직렬화
+- 경로 탐색(Path Traversal) 취약점
+
+**왜 중요한가?**
+- OWASP Top 10 취약점의 대부분을 개발 단계에서 발견 가능
+- 코드 리뷰에서 놓칠 수 있는 보안 이슈를 자동으로 탐지
+- 배포 전에 취약점을 수정하면 비용이 100배 이상 절감됩니다
+
+#### 3. Trivy (Dependency & Container Scanner / SCA)
+
+**목적**: 의존성 패키지 및 컨테이너 이미지의 알려진 취약점(CVE)을 탐지합니다.
+
+**작동 방식**:
+- 취약점 데이터베이스(NVD, GitHub Advisory 등)와 비교
+- 패키지 버전별 알려진 취약점 매칭
+- 취약점에 대한 수정 버전 정보 제공
+
+**지원 대상**:
+| 유형 | 지원 항목 |
+|------|----------|
+| 패키지 매니저 | npm, pip, Maven, Go modules, Cargo, Bundler 등 |
+| 컨테이너 | Docker 이미지, OS 패키지 (Alpine, Debian, Ubuntu 등) |
+| IaC | Terraform, Kubernetes YAML, Dockerfile |
+
+**왜 중요한가?**
+- 현대 애플리케이션의 80% 이상이 오픈소스 라이브러리로 구성됩니다
+- Log4Shell(CVE-2021-44228)처럼 하나의 라이브러리 취약점이 전 세계를 마비시킬 수 있습니다
+- 의존성 취약점은 공급망 공격(Supply Chain Attack)의 주요 경로입니다
+
+#### 4. Checkov (IaC Scanner)
+
+**목적**: Infrastructure as Code 파일의 보안 설정 오류를 탐지합니다.
+
+**작동 방식**:
+- 사전 정의된 정책(Policy as Code)으로 검사
+- 클라우드 보안 모범 사례와 비교
+- CIS 벤치마크, SOC2 등 컴플라이언스 체크
+
+**지원 프레임워크**:
+- Terraform (AWS, GCP, Azure)
+- CloudFormation
+- Kubernetes YAML
+- Dockerfile
+- GitHub Actions
+
+**탐지 예시**:
+- S3 버킷 공개 접근 설정
+- 암호화 미설정 (RDS, EBS, S3 등)
+- 과도한 IAM 권한 (`*:*`)
+- 보안 그룹에서 0.0.0.0/0 허용
+
+**왜 중요한가?**
+- 클라우드 보안 사고의 90%가 설정 오류에서 발생합니다
+- 코드로 인프라를 관리하면 설정 오류도 코드 리뷰로 방지할 수 있습니다
+- 배포 전에 발견하면 실제 인프라 노출 위험을 제거합니다
+
+#### 5. Syft (SBOM Generator)
+
+**목적**: 프로젝트에 포함된 모든 소프트웨어 구성요소 목록(SBOM)을 생성합니다.
+
+**출력 포맷**:
+- CycloneDX (OWASP 표준)
+- SPDX (Linux Foundation 표준)
+
+**생성되는 정보**:
+- 패키지 이름 및 버전
+- 라이선스 정보
+- 의존성 관계
+- 파일 해시
+
+**왜 중요한가?**
+- 미국 정부 납품 소프트웨어는 SBOM 제출이 의무입니다 (행정명령 14028)
+- 취약점 발생 시 영향받는 시스템을 빠르게 파악할 수 있습니다
+- 라이선스 컴플라이언스 확인에 필수입니다
+
+#### 6. SonarQube (Deep SAST + Code Quality)
+
+**목적**: 심층 정적 분석과 코드 품질 측정을 동시에 수행합니다.
+
+**특징**:
+- 데이터 흐름 분석 (변수가 어디서 어디로 흐르는지 추적)
+- 오염 분석(Taint Analysis): 사용자 입력이 위험한 함수에 도달하는지 추적
+- Security Hotspot: 자동 판단 불가, 개발자 검토 필요한 코드 표시
+
+**추가 기능**:
+- 코드 스멜 (유지보수 어려운 코드)
+- 중복 코드 탐지
+- 기술 부채 측정
+- 테스트 커버리지
+
+**왜 중요한가?**
+- Semgrep보다 더 깊은 분석이 필요할 때 사용합니다
+- 보안과 코드 품질을 한 번에 관리할 수 있습니다
+- 기업 환경에서 품질 게이트로 활용 가능합니다
+
+---
+
+### 부록 B: 보안 용어 사전
+
+#### 스캔 방식
+
+| 용어 | 전체 명칭 | 설명 |
+|------|----------|------|
+| **SAST** | Static Application Security Testing | 소스코드를 실행하지 않고 분석하는 정적 보안 테스트. 개발 초기에 취약점 발견 가능. Semgrep, SonarQube가 해당 |
+| **DAST** | Dynamic Application Security Testing | 실행 중인 애플리케이션을 외부에서 테스트하는 동적 보안 테스트. OWASP ZAP이 대표적 |
+| **SCA** | Software Composition Analysis | 오픈소스/서드파티 라이브러리의 취약점과 라이선스 분석. Trivy가 해당 |
+| **IAST** | Interactive Application Security Testing | SAST + DAST 결합, 런타임에서 코드 내부 분석. 에이전트 설치 필요 |
+
+#### 취약점 식별 체계
+
+| 용어 | 전체 명칭 | 설명 |
+|------|----------|------|
+| **CVE** | Common Vulnerabilities and Exposures | 공개된 보안 취약점의 고유 식별자. 예: CVE-2021-44228 (Log4Shell) |
+| **CWE** | Common Weakness Enumeration | 취약점 유형 분류 체계. 예: CWE-89 (SQL Injection), CWE-79 (XSS) |
+| **CVSS** | Common Vulnerability Scoring System | 취약점 심각도 점수 (0.0~10.0). 7.0 이상이면 High/Critical |
+| **NVD** | National Vulnerability Database | 미국 NIST가 운영하는 취약점 데이터베이스 |
+
+#### 보안 표준 및 프레임워크
+
+| 용어 | 설명 |
+|------|------|
+| **OWASP** | Open Web Application Security Project. 웹 보안 비영리 재단 |
+| **OWASP Top 10** | 가장 위험한 웹 취약점 10가지 목록. 3~4년마다 갱신. Injection, Broken Auth, XSS 등 포함 |
+| **SARIF** | Static Analysis Results Interchange Format. 정적 분석 결과를 표현하는 표준 JSON 포맷. GitHub Security 탭과 호환 |
+| **SBOM** | Software Bill of Materials. 소프트웨어에 포함된 모든 구성요소 목록. 식품의 성분표와 유사한 개념 |
+| **CIS Benchmark** | Center for Internet Security에서 제공하는 보안 구성 가이드라인 |
+
+#### 기타 주요 용어
+
+| 용어 | 설명 |
+|------|------|
+| **IaC** | Infrastructure as Code. 인프라를 코드로 관리 (Terraform, K8s YAML 등) |
+| **Security Hotspot** | 자동으로 취약점 여부 판단 불가, 개발자가 수동 검토해야 하는 코드 영역 |
+| **False Positive** | 오탐. 취약점이 아닌데 취약점으로 잘못 탐지된 경우 |
+| **True Positive** | 정탐. 실제 취약점이 정확히 탐지된 경우 |
+| **Zero-Day** | 패치가 아직 없는 신규 취약점. 공개되면 즉시 공격에 악용될 위험 |
+| **Supply Chain Attack** | 공급망 공격. 의존성 패키지를 통한 공격. event-stream, ua-parser-js 사건이 대표적 |
+| **Exploit** | 취약점을 실제로 악용하는 공격 코드 또는 기법 |
+| **CVE PoC** | 취약점 개념 증명 코드. 공개되면 공격 위험이 급격히 증가 |
+
+---
+
+### 부록 C: 심각도 수준 가이드
+
+#### 심각도 분류표
+
+| 수준 | CVSS 점수 | 설명 | 권장 대응 시간 |
+|------|----------|------|---------------|
+| 🔴 **Critical** | 9.0~10.0 | 즉시 악용 가능, 시스템 전체 장악 또는 대규모 데이터 유출 위험 | 즉시 (24시간 내) |
+| 🟠 **High** | 7.0~8.9 | 심각한 데이터 유출 또는 서비스 중단 가능 | 1주일 내 |
+| 🟡 **Medium** | 4.0~6.9 | 제한된 조건에서 악용 가능, 부분적 영향 | 1개월 내 |
+| 🔵 **Low** | 0.1~3.9 | 악용 어려움, 영향 범위 제한적 | 다음 릴리스 |
+| ⚪ **Info** | 0.0 | 정보성 알림, 직접적 보안 영향 없음 | 선택적 |
+
+#### 심각도 결정 요소 (CVSS 기준)
+
+| 요소 | 설명 | 점수 영향 |
+|------|------|----------|
+| **공격 벡터** | 네트워크/인접/로컬/물리적 접근 필요 여부 | 네트워크 > 로컬 |
+| **공격 복잡도** | 얼마나 쉽게 악용할 수 있는가 | 낮음 > 높음 |
+| **권한 요구** | 공격에 인증/권한이 필요한가 | 불필요 > 높은 권한 |
+| **사용자 상호작용** | 피해자의 동작이 필요한가 | 불필요 > 필요 |
+| **영향 범위** | 기밀성/무결성/가용성 중 어떤 것이 영향받는가 | 3가지 모두 > 일부 |
+
+#### 실제 대응 예시
+
+| 상황 | 권장 조치 |
+|------|----------|
+| Critical CVE + Exploit 공개 | 즉시 패치 또는 서비스 일시 중단 검토 |
+| High 취약점 + 인터넷 노출 서비스 | 1주일 내 패치, 임시 WAF 규칙 적용 |
+| Medium 취약점 + 내부 시스템 | 정기 패치 주기에 포함 |
+| Low 취약점 | 다음 릴리스에 포함, 모니터링 |
+
+#### 이 Action에서의 활용
+
+```yaml
+# Critical/High만 차단 (권장)
+severity-threshold: 'high'
+fail-on-findings: 'true'
+
+# 모든 이슈 리포팅 (감사용)
+severity-threshold: 'low'
+fail-on-findings: 'false'
+```
