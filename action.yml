@@ -84,6 +84,10 @@ inputs:
     required: false
 
   # 공통 설정
+  check-name:
+    description: 'Required Status Check 이름 (기본: Security scan results)'
+    required: false
+    default: 'Security scan results'
   severity-threshold:
     description: '실패 기준 심각도 (critical, high, medium, low)'
     required: false
@@ -150,6 +154,7 @@ runs:
     INPUT_OPENAI_API_KEY: ${{ inputs.openai-api-key }}
     INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
     # 공통
+    INPUT_CHECK_NAME: ${{ inputs.check-name }}
     INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
     INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
     INPUT_CONFIG_PATH: ${{ inputs.config-path }}

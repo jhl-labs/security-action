@@ -152,6 +152,7 @@ jobs:
           container-scan: 'true'
           container-image: 'security-action:scan-test'
           # 설정
+          check-name: 'Container security scan'  # 별도 Required Check 이름
           severity-threshold: 'critical'
           fail-on-findings: 'false'
           sarif-output: 'container-scan.sarif'
@@ -165,15 +166,17 @@ jobs:
           echo "### Check Runs Created" >> $GITHUB_STEP_SUMMARY
           echo "| Check Run | Description |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Security scan results** | Required status check (container scan) |" >> $GITHUB_STEP_SUMMARY
-          echo "| **🐳 Container Scan** | Container image vulnerability scan |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Container security scan** | Required status check for container vulnerabilities |" >> $GITHUB_STEP_SUMMARY
+          echo "| **🐳 Container Scan** | Detailed container image scan results |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Results" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: \`security-action:scan-test\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Findings**: ${{ steps.container-scan.outputs.findings-count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Threshold**: critical (only critical issues block)" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`security-action:scan-test\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Findings | ${{ steps.container-scan.outputs.findings-count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Threshold | critical |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> **Note**: This job only runs after \`build-test\` completes successfully." >> $GITHUB_STEP_SUMMARY
+          echo "> **Note**: This job runs after \`build-test\` completes." >> $GITHUB_STEP_SUMMARY
 
   # Docker 이미지 빌드 테스트
   build-test:

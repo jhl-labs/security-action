@@ -148,6 +148,7 @@ class GitHubReporter:
         token: str | None = None,
         severity_threshold: str = "high",
         fail_on_findings: bool = True,
+        check_name: str | None = None,
     ):
         """GitHubReporter 초기화
 
@@ -155,10 +156,12 @@ class GitHubReporter:
             token: GitHub 토큰
             severity_threshold: 실패 처리할 최소 심각도 (critical, high, medium, low)
             fail_on_findings: 취약점 발견 시 실패 처리 여부
+            check_name: Required Status Check 이름 (기본: Security scan results)
         """
         self.token = token or os.getenv("GITHUB_TOKEN") or os.getenv("INPUT_GITHUB_TOKEN")
         self.severity_threshold = severity_threshold.lower()
         self.fail_on_findings = fail_on_findings
+        self.check_name = check_name or self.REQUIRED_CHECK_NAME
         self.github: Github | None = None
         self.repo: Repository | None = None
         self.pr: PullRequest | None = None
@@ -239,7 +242,7 @@ class GitHubReporter:
 
         try:
             self._required_check = self.repo.create_check_run(
-                name=self.REQUIRED_CHECK_NAME,
+                name=self.check_name,
                 head_sha=sha,
                 status="in_progress",
                 output={
@@ -247,7 +250,7 @@ class GitHubReporter:
                     "summary": "⏳ Running security scans. Please wait.",
                 },
             )
-            logger.info(f"Started required check: {self.REQUIRED_CHECK_NAME}")
+            logger.info(f"Started required check: {self.check_name}")
             return True
         except GithubException as e:
             logger.error(f"Failed to start required check: {e}")
@@ -294,7 +297,7 @@ class GitHubReporter:
                 )
             else:
                 self.repo.create_check_run(
-                    name=self.REQUIRED_CHECK_NAME,
+                    name=self.check_name,
                     head_sha=sha,
                     status="completed",
                     conclusion=conclusion.value,
@@ -304,7 +307,7 @@ class GitHubReporter:
                     },
                 )
 
-            logger.info(f"Completed required check: {conclusion.value} - {title}")
+            logger.info(f"Completed required check: {self.check_name} - {conclusion.value}")
             return True
         except GithubException as e:
             logger.error(f"Failed to complete required check: {e}")

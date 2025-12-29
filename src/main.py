@@ -92,6 +92,7 @@ class Config:
     # AI 리뷰
     ai_review: bool = False
     # 공통
+    check_name: str = "Security scan results"
     severity_threshold: Severity = Severity.HIGH
     fail_on_findings: bool = True
     sarif_output: str = "security-results.sarif"
@@ -130,6 +131,7 @@ class Config:
             # AI 리뷰
             ai_review=str_to_bool(os.getenv("INPUT_AI_REVIEW", "false")),
             # 공통
+            check_name=os.getenv("INPUT_CHECK_NAME", "Security scan results"),
             severity_threshold=Severity.from_string(os.getenv("INPUT_SEVERITY_THRESHOLD", "high")),
             fail_on_findings=str_to_bool(os.getenv("INPUT_FAIL_ON_FINDINGS", "true")),
             sarif_output=os.getenv("INPUT_SARIF_OUTPUT", "security-results.sarif"),
@@ -654,6 +656,7 @@ def generate_reports(
                 token=config.github_token,
                 severity_threshold=config.severity_threshold.value,
                 fail_on_findings=config.fail_on_findings,
+                check_name=config.check_name,
             )
 
             if github.is_available():
@@ -779,10 +782,11 @@ def main() -> int:
                 token=config.github_token,
                 severity_threshold=config.severity_threshold.value,
                 fail_on_findings=config.fail_on_findings,
+                check_name=config.check_name,
             )
             if github_reporter.is_available():
                 console.print("[green]✓[/green] GitHub Check Run integration enabled")
-                console.print(f"  Required check: {github_reporter.REQUIRED_CHECK_NAME}")
+                console.print(f"  Required check: {github_reporter.check_name}")
 
                 # Required Status Check 시작 (GHAS 스타일)
                 github_reporter.start_required_check()
@@ -926,7 +930,7 @@ def main() -> int:
         github_reporter.create_overall_status(all_findings)
 
         console.print(
-            f"\n[green]✓[/green] GitHub Check completed: {github_reporter.REQUIRED_CHECK_NAME}"
+            f"\n[green]✓[/green] GitHub Check completed: {github_reporter.check_name}"
         )
 
     # 실패 여부 판단
