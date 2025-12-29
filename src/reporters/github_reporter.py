@@ -287,6 +287,10 @@ class GitHubReporter:
 
         # Annotations 생성 (모든 findings에 대해)
         all_annotations = self._create_annotations(all_findings)
+        logger.info(
+            f"Creating required check with {len(all_findings)} findings, "
+            f"{len(all_annotations)} annotations"
+        )
 
         try:
             # 첫 번째 50개 어노테이션으로 완료

@@ -222,10 +222,10 @@ jobs:
           "
 
   # ─────────────────────────────────────────────────────────────────────────
-  # 📊 Summary Job (통합 리포트)
+  # 📊 Report Job (통합 리포트)
   # ─────────────────────────────────────────────────────────────────────────
-  summary:
-    name: 📊 Summary
+  report:
+    name: 📊 Report
     runs-on: jhl-space
     needs: [security-scan, container-scan, build, lint]
     if: always()

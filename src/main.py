@@ -945,6 +945,7 @@ def main() -> int:
                 )
 
             # Required Check 완료
+            console.print(f"  Creating Required Check with {len(all_findings)} findings...")
             github_reporter.complete_required_check(
                 all_findings=all_findings,
                 scan_results=scan_summary,
