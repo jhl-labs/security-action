@@ -929,9 +929,7 @@ def main() -> int:
         # 전체 Commit Status 생성
         github_reporter.create_overall_status(all_findings)
 
-        console.print(
-            f"\n[green]✓[/green] GitHub Check completed: {github_reporter.check_name}"
-        )
+        console.print(f"\n[green]✓[/green] GitHub Check completed: {github_reporter.check_name}")
 
     # 실패 여부 판단
     if should_fail(results, config):
