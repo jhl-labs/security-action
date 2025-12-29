@@ -83,6 +83,9 @@ class Config:
     container_image: str | None = None
     iac_scan: bool = False
     iac_frameworks: list[str] | None = None
+    # 네이티브 의존성 스캔
+    native_audit: bool = False
+    native_audit_tools: list[str] | None = None
     # SBOM
     sbom_generate: bool = False
     sbom_format: str = "cyclonedx-json"
@@ -114,6 +117,11 @@ class Config:
         iac_frameworks_str = os.getenv("INPUT_IAC_FRAMEWORKS", "")
         iac_frameworks = [f.strip() for f in iac_frameworks_str.split(",") if f.strip()] or None
 
+        native_audit_tools_str = os.getenv("INPUT_NATIVE_AUDIT_TOOLS", "auto")
+        native_audit_tools = [
+            t.strip() for t in native_audit_tools_str.split(",") if t.strip()
+        ] or ["auto"]
+
         return cls(
             # 기본 스캐너
             secret_scan=str_to_bool(os.getenv("INPUT_SECRET_SCAN", "true")),
@@ -125,6 +133,9 @@ class Config:
             container_image=os.getenv("INPUT_CONTAINER_IMAGE"),
             iac_scan=str_to_bool(os.getenv("INPUT_IAC_SCAN", "false")),
             iac_frameworks=iac_frameworks,
+            # 네이티브 의존성 스캔
+            native_audit=str_to_bool(os.getenv("INPUT_NATIVE_AUDIT", "false")),
+            native_audit_tools=native_audit_tools,
             # SBOM
             sbom_generate=str_to_bool(os.getenv("INPUT_SBOM_GENERATE", "false")),
             sbom_format=os.getenv("INPUT_SBOM_FORMAT", "cyclonedx-json"),
@@ -355,6 +366,16 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
     if config.iac_scan:
         scanners_to_run.append(
             ("Checkov", "iac_scanner", "IaCScanner", "🏗️", {"frameworks": config.iac_frameworks})
+        )
+    if config.native_audit:
+        scanners_to_run.append(
+            (
+                "NativeAudit",
+                "native_audit_scanner",
+                "NativeAuditScanner",
+                "🔧",
+                {"tools": config.native_audit_tools},
+            )
         )
     if config.sonar_scan:
         scanners_to_run.append(("SonarQube", "sonar_scanner", "SonarScanner", "🔬", {}))
@@ -785,6 +806,10 @@ def main() -> int:
         + (f" ({config.container_image})" if config.container_image else "")
     )
     console.print(f"  IaC Scan: {config.iac_scan}")
+    console.print(
+        f"  Native Audit: {config.native_audit}"
+        + (f" ({', '.join(config.native_audit_tools or ['auto'])})" if config.native_audit else "")
+    )
     console.print(f"  SonarQube Scan: {config.sonar_scan}")
     console.print(f"  SBOM Generate: {config.sbom_generate}")
     console.print(f"  AI Review: {config.ai_review}")

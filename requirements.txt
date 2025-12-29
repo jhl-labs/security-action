@@ -1,6 +1,7 @@
 # Security Scanners
 semgrep>=1.90.0
 checkov>=3.2.0  # IaC Security Scanner
+pip-audit>=2.7.0  # Python dependency vulnerability scanner
 
 # AI/LLM Framework
 langgraph>=0.2.0

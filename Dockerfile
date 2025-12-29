@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 시스템 의존성 설치 (Java for SonarQube Scanner)
+# 시스템 의존성 설치 (Java for SonarQube Scanner, Ruby for bundler-audit)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
@@ -17,9 +17,50 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     unzip \
     openjdk-21-jre-headless \
+    ruby \
+    ruby-dev \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
+# Node.js 설치 (npm audit용)
+ARG NODE_VERSION=20
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
+
+# Go 설치 (govulncheck용)
+ARG GO_VERSION=1.22.5
+RUN wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz \
+    && rm -f go${GO_VERSION}.linux-amd64.tar.gz
+
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+ENV GOPATH="/root/go"
+
+# govulncheck 설치
+RUN go install golang.org/x/vuln/cmd/govulncheck@latest \
+    && govulncheck --version || true
+
+# cargo-audit 설치 (Rust)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+    && . /root/.cargo/env \
+    && cargo install cargo-audit \
+    && cargo-audit --version
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# bundler-audit 설치 (Ruby)
+RUN gem install bundler-audit --no-document \
+    && bundler-audit version
+
+# Composer 설치 (PHP)
+RUN apt-get update && apt-get install -y --no-install-recommends php-cli \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer \
+    && composer --version
 
 # Gitleaks 설치 (v8.x)
 ARG GITLEAKS_VERSION=8.21.2

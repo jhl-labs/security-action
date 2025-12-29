@@ -48,6 +48,10 @@ jobs:
           iac-scan: 'true'
           iac-frameworks: 'dockerfile,github_actions,kubernetes'
 
+          # 네이티브 의존성 스캔 (npm audit, pip-audit 등)
+          native-audit: 'true'
+          native-audit-tools: 'auto'
+
           # SBOM 생성
           sbom-generate: 'true'
           sbom-format: 'cyclonedx-json'

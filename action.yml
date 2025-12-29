@@ -41,6 +41,16 @@ inputs:
     description: 'IaC 프레임워크 (terraform,kubernetes,dockerfile 등)'
     required: false
 
+  # 네이티브 의존성 스캔
+  native-audit:
+    description: '언어별 네이티브 의존성 스캔 활성화 (npm audit, pip-audit, govulncheck 등)'
+    required: false
+    default: 'false'
+  native-audit-tools:
+    description: '사용할 네이티브 도구 목록 (auto, npm, pip, go, cargo, bundler, composer)'
+    required: false
+    default: 'auto'
+
   # SBOM 생성
   sbom-generate:
     description: 'SBOM 생성 활성화 (Syft)'
@@ -152,6 +162,9 @@ runs:
     INPUT_CONTAINER_IMAGE: ${{ inputs.container-image }}
     INPUT_IAC_SCAN: ${{ inputs.iac-scan }}
     INPUT_IAC_FRAMEWORKS: ${{ inputs.iac-frameworks }}
+    # 네이티브 의존성 스캔
+    INPUT_NATIVE_AUDIT: ${{ inputs.native-audit }}
+    INPUT_NATIVE_AUDIT_TOOLS: ${{ inputs.native-audit-tools }}
     # SBOM
     INPUT_SBOM_GENERATE: ${{ inputs.sbom-generate }}
     INPUT_SBOM_FORMAT: ${{ inputs.sbom-format }}
