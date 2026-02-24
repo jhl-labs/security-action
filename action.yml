@@ -1,0 +1,222 @@
+name: 'Security Scanner Action'
+description: 'GitHub Advanced Security 기능을 오픈소스로 구현한 통합 보안 스캐너'
+author: 'Security Action Team'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  # 기본 스캐너
+  secret-scan:
+    description: '비밀값 노출 스캔 활성화 (Gitleaks)'
+    required: false
+    default: 'true'
+  secret-scan-history:
+    description: 'Git commit history도 스캔 (전체 기록 검사)'
+    required: false
+    default: 'false'
+  code-scan:
+    description: '코드 취약점 스캔 활성화 (Semgrep)'
+    required: false
+    default: 'true'
+  dependency-scan:
+    description: '의존성 취약점 스캔 활성화 (Trivy)'
+    required: false
+    default: 'true'
+
+  # 추가 스캐너
+  container-scan:
+    description: '컨테이너 이미지 스캔 활성화 (Trivy)'
+    required: false
+    default: 'false'
+  container-image:
+    description: '스캔할 컨테이너 이미지 (예: nginx:latest)'
+    required: false
+  iac-scan:
+    description: 'IaC 보안 스캔 활성화 (Checkov)'
+    required: false
+    default: 'false'
+  iac-frameworks:
+    description: 'IaC 프레임워크 (terraform,kubernetes,dockerfile 등)'
+    required: false
+
+  # 네이티브 의존성 스캔
+  native-audit:
+    description: '언어별 네이티브 의존성 스캔 활성화 (npm audit, pip-audit, govulncheck 등)'
+    required: false
+    default: 'false'
+  native-audit-tools:
+    description: '사용할 네이티브 도구 목록 (auto, npm, pip, go, cargo, bundler, composer)'
+    required: false
+    default: 'auto'
+
+  # SBOM 생성
+  sbom-generate:
+    description: 'SBOM 생성 활성화 (Syft)'
+    required: false
+    default: 'false'
+  sbom-format:
+    description: 'SBOM 출력 포맷 (cyclonedx-json, spdx-json, syft-json)'
+    required: false
+    default: 'cyclonedx-json'
+  sbom-output:
+    description: 'SBOM 출력 파일 경로'
+    required: false
+    default: 'sbom.json'
+
+  # SonarQube
+  sonar-scan:
+    description: 'SonarQube 코드 품질 스캔 활성화'
+    required: false
+    default: 'false'
+  sonar-host-url:
+    description: 'SonarQube 서버 URL'
+    required: false
+    default: 'http://localhost:9000'
+  sonar-token:
+    description: 'SonarQube 인증 토큰'
+    required: false
+  sonar-project-key:
+    description: 'SonarQube 프로젝트 키'
+    required: false
+
+  # AI 리뷰
+  ai-review:
+    description: 'AI 기반 코드 리뷰 활성화 (LangGraph)'
+    required: false
+    default: 'false'
+  ai-provider:
+    description: 'AI 제공자 (auto, openai, anthropic)'
+    required: false
+    default: 'auto'
+  ai-model:
+    description: 'AI 모델명 (예: gpt-4o, claude-3-5-sonnet-20241022)'
+    required: false
+  openai-api-key:
+    description: 'OpenAI API 키 (AI 리뷰 사용 시 필수)'
+    required: false
+  openai-base-url:
+    description: 'OpenAI 호환 API Base URL (사내 게이트웨이/프록시 사용 시)'
+    required: false
+  anthropic-api-key:
+    description: 'Anthropic API 키 (AI 리뷰 사용 시 대안)'
+    required: false
+
+  # 공통 설정
+  check-name:
+    description: 'Required Status Check 이름 (기본: 🛡️ Security Report)'
+    required: false
+    default: '🛡️ Security Report'
+  skip-check:
+    description: 'Required Status Check 생성 건너뛰기 (개별 스캐너 체크만 생성)'
+    required: false
+    default: 'false'
+  scanner-checks:
+    description: '개별 스캐너 Check Run 생성 여부 (기본: false - 통합 Report만 생성)'
+    required: false
+    default: 'false'
+  post-summary:
+    description: 'GitHub Actions Job Summary 생성 여부 (기본: true)'
+    required: false
+    default: 'true'
+  severity-threshold:
+    description: '실패 기준 심각도 (critical, high, medium, low)'
+    required: false
+    default: 'high'
+  github-token:
+    description: 'GitHub 토큰 (PR 코멘트, Check Run용)'
+    required: false
+    default: ${{ github.token }}
+  config-path:
+    description: '커스텀 설정 파일 경로 (.security-action.yml)'
+    required: false
+  fail-on-findings:
+    description: '취약점 발견 시 워크플로우 실패 처리'
+    required: false
+    default: 'true'
+  sarif-output:
+    description: 'SARIF 포맷 결과 파일 경로'
+    required: false
+    default: 'security-results.sarif'
+  upload-sarif:
+    description: 'GitHub Security 탭에 SARIF 직접 업로드 (내장 API 연동)'
+    required: false
+    default: 'false'
+  sarif-category:
+    description: 'SARIF 카테고리(runAutomationDetails.id)'
+    required: false
+    default: 'security-action'
+  fail-on-sarif-upload-error:
+    description: 'SARIF 업로드 실패 시 워크플로우 실패 처리'
+    required: false
+    default: 'false'
+  usage-tracking:
+    description: '사용량 추적(기본: false, 외부 전송 없음)'
+    required: false
+    default: 'false'
+
+outputs:
+  scan-results:
+    description: '스캔 결과 JSON'
+  findings-count:
+    description: '발견된 취약점 총 개수'
+  critical-count:
+    description: 'Critical 심각도 취약점 개수'
+  high-count:
+    description: 'High 심각도 취약점 개수'
+  sarif-file:
+    description: 'SARIF 결과 파일 경로'
+  sarif-upload-id:
+    description: 'GitHub Code Scanning SARIF 업로드 ID'
+  sbom-file:
+    description: 'SBOM 결과 파일 경로'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    # 기본 스캐너
+    INPUT_SECRET_SCAN: ${{ inputs.secret-scan }}
+    INPUT_SECRET_SCAN_HISTORY: ${{ inputs.secret-scan-history }}
+    INPUT_CODE_SCAN: ${{ inputs.code-scan }}
+    INPUT_DEPENDENCY_SCAN: ${{ inputs.dependency-scan }}
+    # 추가 스캐너
+    INPUT_CONTAINER_SCAN: ${{ inputs.container-scan }}
+    INPUT_CONTAINER_IMAGE: ${{ inputs.container-image }}
+    INPUT_IAC_SCAN: ${{ inputs.iac-scan }}
+    INPUT_IAC_FRAMEWORKS: ${{ inputs.iac-frameworks }}
+    # 네이티브 의존성 스캔
+    INPUT_NATIVE_AUDIT: ${{ inputs.native-audit }}
+    INPUT_NATIVE_AUDIT_TOOLS: ${{ inputs.native-audit-tools }}
+    # SBOM
+    INPUT_SBOM_GENERATE: ${{ inputs.sbom-generate }}
+    INPUT_SBOM_FORMAT: ${{ inputs.sbom-format }}
+    INPUT_SBOM_OUTPUT: ${{ inputs.sbom-output }}
+    # SonarQube
+    INPUT_SONAR_SCAN: ${{ inputs.sonar-scan }}
+    SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+    SONAR_TOKEN: ${{ inputs.sonar-token }}
+    SONAR_PROJECT_KEY: ${{ inputs.sonar-project-key }}
+    # AI 리뷰
+    INPUT_AI_REVIEW: ${{ inputs.ai-review }}
+    INPUT_AI_PROVIDER: ${{ inputs.ai-provider }}
+    INPUT_AI_MODEL: ${{ inputs.ai-model }}
+    INPUT_OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+    INPUT_OPENAI_BASE_URL: ${{ inputs.openai-base-url }}
+    OPENAI_BASE_URL: ${{ inputs.openai-base-url }}
+    INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+    # 공통
+    INPUT_CHECK_NAME: ${{ inputs.check-name }}
+    INPUT_SKIP_CHECK: ${{ inputs.skip-check }}
+    INPUT_SCANNER_CHECKS: ${{ inputs.scanner-checks }}
+    INPUT_POST_SUMMARY: ${{ inputs.post-summary }}
+    INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+    INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+    INPUT_CONFIG_PATH: ${{ inputs.config-path }}
+    INPUT_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+    INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+    INPUT_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+    INPUT_SARIF_CATEGORY: ${{ inputs.sarif-category }}
+    INPUT_FAIL_ON_SARIF_UPLOAD_ERROR: ${{ inputs.fail-on-sarif-upload-error }}
+    INPUT_USAGE_TRACKING: ${{ inputs.usage-tracking }}

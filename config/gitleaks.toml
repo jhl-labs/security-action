@@ -1,0 +1,30 @@
+# Gitleaks Configuration
+# 기본 설정 - 커스터마이징 가능
+
+title = "Security Action - Gitleaks Config"
+
+[extend]
+# 기본 규칙 사용
+useDefault = true
+
+# 허용 목록 (오탐 제거)
+[allowlist]
+description = "Allowlist for false positives"
+paths = [
+    '''node_modules/''',
+    '''vendor/''',
+    '''\.git/''',
+    '''dist/''',
+    '''build/''',
+    '''\.venv/''',
+    '''__pycache__/''',
+    '''\.pytest_cache/''',
+]
+regexTarget = "match"
+
+# 예제 및 테스트 파일의 가짜 비밀값 허용
+[[rules]]
+id = "allow-test-secrets"
+description = "Allow fake secrets in test files"
+path = '''(test|spec|mock|fixture|example)'''
+allowlist = { regexes = ['''(?i)(test|fake|dummy|example|sample)'''] }
