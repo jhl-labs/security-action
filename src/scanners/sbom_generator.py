@@ -51,6 +51,17 @@ class SBOMGenerator:
         self.output_path = output_path or os.getenv("INPUT_SBOM_OUTPUT", "sbom.json")
         self.image = image or os.getenv("INPUT_SBOM_IMAGE")
 
+    def _resolve_output_file(self) -> Path:
+        """출력 파일 경로를 절대 경로로 해석한다.
+
+        relative 경로는 workspace 기준으로 처리해 GitHub Actions 컨테이너에서도
+        실제 생성 위치와 존재성 검증 위치가 일치하도록 보장한다.
+        """
+        output_file = Path(self.output_path)
+        if output_file.is_absolute():
+            return output_file
+        return Path(self.workspace) / output_file
+
     def generate(self) -> dict[str, Any]:
         """SBOM 생성
 
@@ -68,7 +79,7 @@ class SBOMGenerator:
 
         try:
             # 출력 경로 준비
-            output_file = Path(self.output_path)
+            output_file = self._resolve_output_file()
             output_file.parent.mkdir(parents=True, exist_ok=True)
 
             # Syft 명령 구성
@@ -84,7 +95,7 @@ class SBOMGenerator:
             cmd.extend(
                 [
                     "--output",
-                    f"{self.output_format}={self.output_path}",
+                    f"{self.output_format}={str(output_file)}",
                 ]
             )
 
@@ -169,7 +180,7 @@ class SBOMGenerator:
 
     def get_components(self) -> list[dict]:
         """SBOM에서 구성 요소 목록 추출"""
-        sbom_file = Path(self.output_path)
+        sbom_file = self._resolve_output_file()
         if not sbom_file.exists():
             return []
 

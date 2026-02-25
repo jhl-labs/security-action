@@ -25,6 +25,28 @@ def _pip_audit_output() -> str:
     )
 
 
+def _pip_audit_output_v2() -> str:
+    return json.dumps(
+        {
+            "dependencies": [
+                {
+                    "name": "requests",
+                    "version": "2.25.0",
+                    "vulns": [
+                        {
+                            "id": "PYSEC-2024-1",
+                            "description": "test vulnerability",
+                            "aliases": ["CVE-2024-0001"],
+                            "fix_versions": ["2.32.0"],
+                        }
+                    ],
+                }
+            ],
+            "fixes": [],
+        }
+    )
+
+
 def test_run_pip_audit_uses_requirements_files(tmp_path, monkeypatch):
     service_a = tmp_path / "service-a"
     service_a.mkdir()
@@ -82,6 +104,25 @@ def test_run_pip_audit_falls_back_to_lock_file_directories(tmp_path, monkeypatch
 
     assert len(findings) == 1
     assert findings[0].file_path == "app/Pipfile.lock"
+
+
+def test_run_pip_audit_parses_v2_dependencies_format(tmp_path, monkeypatch):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "requirements.txt").write_text("requests==2.25.0\n")
+
+    scanner = NativeAuditScanner(str(tmp_path), tools=["pip"])
+
+    def fake_run_command(cmd, capture_output=True, timeout=None, cwd=None, env=None):
+        return SimpleNamespace(stdout=_pip_audit_output_v2(), stderr="", returncode=1)
+
+    monkeypatch.setattr(scanner, "run_command", fake_run_command)
+
+    findings = scanner._run_pip_audit()
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == "PYSEC-2024-1"
+    assert findings[0].file_path == "app/requirements.txt"
 
 
 def test_run_scan_returns_failure_when_audit_raises(tmp_path, monkeypatch):

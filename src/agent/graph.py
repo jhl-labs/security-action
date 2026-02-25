@@ -111,7 +111,9 @@ def create_config_from_env() -> AgentConfig:
     anthropic_key = os.getenv("INPUT_ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
     provider_input = (os.getenv("INPUT_AI_PROVIDER") or "auto").strip().lower()
     model_input = (os.getenv("INPUT_AI_MODEL") or "").strip()
-    openai_base_url = (os.getenv("INPUT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").strip()
+    openai_base_url = (
+        os.getenv("INPUT_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or ""
+    ).strip()
 
     # API 키에 따라 provider 결정
     if provider_input in {"openai", "anthropic"}:

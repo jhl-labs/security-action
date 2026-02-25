@@ -186,9 +186,7 @@ def set_github_output(name: str, value: str) -> None:
         with open(github_output, "a", encoding="utf-8") as f:
             f.write(f"{name}<<{delimiter}\n{value_str}\n{delimiter}\n")
     else:
-        escaped_value = (
-            value_str.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-        )
+        escaped_value = value_str.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
         print(f"::set-output name={name}::{escaped_value}")
 
 
@@ -1155,7 +1153,9 @@ def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: st
 
     # 스캐너가 INPUT_* 값을 직접 참조하므로 필요한 설정은 env에도 반영.
     if _is_explicit_nested_field(yaml_config, "gitleaks", "config_path"):
-        gitleaks_config_path = _resolve_path_from_workspace(workspace, yaml_config.gitleaks.config_path)
+        gitleaks_config_path = _resolve_path_from_workspace(
+            workspace, yaml_config.gitleaks.config_path
+        )
         if gitleaks_config_path:
             os.environ["INPUT_GITLEAKS_CONFIG"] = gitleaks_config_path
     if _is_explicit_nested_field(yaml_config, "gitleaks", "baseline_path"):
@@ -1167,7 +1167,10 @@ def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: st
 
     if _is_explicit_nested_field(yaml_config, "ai_review", "enabled"):
         os.environ["INPUT_AI_REVIEW"] = str(config.ai_review).lower()
-    if _is_explicit_nested_field(yaml_config, "ai_review", "provider") and yaml_config.ai_review.provider:
+    if (
+        _is_explicit_nested_field(yaml_config, "ai_review", "provider")
+        and yaml_config.ai_review.provider
+    ):
         os.environ["INPUT_AI_PROVIDER"] = str(yaml_config.ai_review.provider)
     if _is_explicit_nested_field(yaml_config, "ai_review", "model") and yaml_config.ai_review.model:
         os.environ["INPUT_AI_MODEL"] = str(yaml_config.ai_review.model)
@@ -1188,7 +1191,9 @@ def apply_global_excludes(
         matched_pattern = next((p for p in exclude_patterns if fnmatch(file_path, p)), None)
         if matched_pattern:
             suppressed_finding = dict(finding)
-            suppressed_finding["suppress_reason"] = f"Matched global_excludes pattern: {matched_pattern}"
+            suppressed_finding["suppress_reason"] = (
+                f"Matched global_excludes pattern: {matched_pattern}"
+            )
             suppressed.append(suppressed_finding)
         else:
             filtered.append(finding)
@@ -1350,7 +1355,9 @@ def main() -> int:
     suppressed_findings = []
 
     if yaml_config and yaml_config.global_excludes:
-        all_findings, global_suppressed = apply_global_excludes(all_findings, yaml_config.global_excludes)
+        all_findings, global_suppressed = apply_global_excludes(
+            all_findings, yaml_config.global_excludes
+        )
         suppressed_findings.extend(global_suppressed)
 
         if global_suppressed:
@@ -1447,8 +1454,7 @@ def main() -> int:
 
     if sarif_upload_blocking:
         console.print(
-            "\n[bold red]❌ SARIF upload failed and "
-            "fail-on-sarif-upload-error=true[/bold red]"
+            "\n[bold red]❌ SARIF upload failed and fail-on-sarif-upload-error=true[/bold red]"
         )
 
     # GitHub Actions 출력

@@ -289,7 +289,8 @@ class NativeAuditScanner(BaseScanner):
 
         req_files = sorted(workspace_path.glob("**/requirements*.txt"))
         lock_files = sorted(
-            list(workspace_path.glob("**/Pipfile.lock")) + list(workspace_path.glob("**/poetry.lock"))
+            list(workspace_path.glob("**/Pipfile.lock"))
+            + list(workspace_path.glob("**/poetry.lock"))
         )
 
         if not req_files and not lock_files:
@@ -303,7 +304,15 @@ class NativeAuditScanner(BaseScanner):
                 rel_req = req_file.relative_to(workspace_path)
                 try:
                     result = self.run_command(
-                        ["pip-audit", "--format", "json", "--progress-spinner", "off", "-r", str(rel_req)],
+                        [
+                            "pip-audit",
+                            "--format",
+                            "json",
+                            "--progress-spinner",
+                            "off",
+                            "-r",
+                            str(rel_req),
+                        ],
                         timeout=300,
                         cwd=self.workspace,
                     )
@@ -344,15 +353,41 @@ class NativeAuditScanner(BaseScanner):
 
         return findings
 
-    def _parse_pip_audit(self, data: list, source_file: str = "requirements.txt") -> list[Finding]:
-        """pip-audit JSON 결과 파싱"""
+    def _parse_pip_audit(
+        self, data: dict | list, source_file: str = "requirements.txt"
+    ) -> list[Finding]:
+        """pip-audit JSON 결과 파싱
+
+        pip-audit 버전에 따라 출력 포맷이 다르다.
+        - 구버전: list[{"name": ..., "version": ..., "vulns": [...]}]
+        - 신버전: {"dependencies": [...], "fixes": [...]}
+        """
         findings: list[Finding] = []
 
-        for vuln in data:
-            pkg_name = vuln.get("name", "unknown")
-            version = vuln.get("version", "")
+        dependencies: list[dict]
+        if isinstance(data, dict):
+            raw_dependencies = data.get("dependencies", [])
+            if not isinstance(raw_dependencies, list):
+                logger.warning("Unexpected pip-audit JSON format: dependencies is not a list")
+                return findings
+            dependencies = [d for d in raw_dependencies if isinstance(d, dict)]
+        elif isinstance(data, list):
+            dependencies = [d for d in data if isinstance(d, dict)]
+        else:
+            logger.warning("Unexpected pip-audit JSON type: %s", type(data).__name__)
+            return findings
 
-            for v in vuln.get("vulns", []):
+        for dep in dependencies:
+            pkg_name = dep.get("name", "unknown")
+            version = dep.get("version", "")
+            vulns = dep.get("vulns", [])
+            if not isinstance(vulns, list):
+                continue
+
+            for v in vulns:
+                if not isinstance(v, dict):
+                    continue
+
                 # CVSS 점수로 심각도 결정
                 severity = Severity.MEDIUM
                 aliases = v.get("aliases", [])
