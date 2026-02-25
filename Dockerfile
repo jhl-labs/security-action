@@ -7,13 +7,16 @@ LABEL description="Security Scanner Action - GitHub Advanced Security Alternativ
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DOWNLOAD_RETRY=6 \
+    DOWNLOAD_RETRY_DELAY=5 \
+    DOWNLOAD_CONNECT_TIMEOUT=20 \
+    DOWNLOAD_MAX_TIME=600
 
 # 시스템 의존성 설치 (Java for SonarQube Scanner, Ruby for bundler-audit)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=5 && apt-get install -y --no-install-recommends \
     curl \
     git \
-    wget \
     ca-certificates \
     unzip \
     openjdk-21-jre-headless \
@@ -25,10 +28,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 
+# 네트워크 일시 실패를 완화하기 위한 공통 다운로드 래퍼
+RUN cat > /usr/local/bin/download_with_retry <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 2 ]; then
+  echo "Usage: download_with_retry <url> <output>" >&2
+  exit 2
+fi
+
+url="$1"
+output="$2"
+
+curl -fL \
+  --retry "${DOWNLOAD_RETRY:-6}" \
+  --retry-delay "${DOWNLOAD_RETRY_DELAY:-5}" \
+  --retry-all-errors \
+  --connect-timeout "${DOWNLOAD_CONNECT_TIMEOUT:-20}" \
+  --max-time "${DOWNLOAD_MAX_TIME:-600}" \
+  -o "${output}" \
+  "${url}"
+EOF
+RUN chmod +x /usr/local/bin/download_with_retry
+
 # Node.js 설치 (npm audit용)
 ARG NODE_VERSION=20.20.0
 ARG NODE_SHA256=4f48b52acf42130844a3a75e94da0e9629009d09e4101b2304895c24f3fbe609
-RUN wget -q https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+RUN download_with_retry "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" "node-v${NODE_VERSION}-linux-x64.tar.xz" \
     && echo "${NODE_SHA256}  node-v${NODE_VERSION}-linux-x64.tar.xz" | sha256sum -c - \
     && tar -xJf node-v${NODE_VERSION}-linux-x64.tar.xz -C /usr/local --strip-components=1 \
     && rm -f node-v${NODE_VERSION}-linux-x64.tar.xz \
@@ -38,7 +65,7 @@ RUN wget -q https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux
 ARG GO_VERSION=1.22.5
 ARG GO_SHA256=904b924d435eaea086515bc63235b192ea441bd8c9b198c507e85009e6e4c7f0
 ARG GOVULNCHECK_VERSION=v1.1.4
-RUN wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
+RUN download_with_retry "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" "go${GO_VERSION}.linux-amd64.tar.gz" \
     && echo "${GO_SHA256}  go${GO_VERSION}.linux-amd64.tar.gz" | sha256sum -c - \
     && tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz \
     && rm -f go${GO_VERSION}.linux-amd64.tar.gz
@@ -63,10 +90,10 @@ RUN gem install bundler-audit -v "${BUNDLER_AUDIT_VERSION}" --no-document \
     && bundler-audit version
 
 # Composer 설치 (PHP)
-RUN apt-get update && apt-get install -y --no-install-recommends php-cli \
+RUN apt-get update -o Acquire::Retries=5 && apt-get install -y --no-install-recommends php-cli \
     && rm -rf /var/lib/apt/lists/* \
-    && EXPECTED_CHECKSUM="$(wget -q -O - https://composer.github.io/installer.sig)" \
-    && php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" \
+    && EXPECTED_CHECKSUM="$(curl -fsSL --retry ${DOWNLOAD_RETRY} --retry-delay ${DOWNLOAD_RETRY_DELAY} --retry-all-errors --connect-timeout ${DOWNLOAD_CONNECT_TIMEOUT} --max-time ${DOWNLOAD_MAX_TIME} https://composer.github.io/installer.sig)" \
+    && download_with_retry "https://getcomposer.org/installer" "composer-setup.php" \
     && ACTUAL_CHECKSUM="$(php -r 'echo hash_file("sha384", "composer-setup.php");')" \
     && test "$EXPECTED_CHECKSUM" = "$ACTUAL_CHECKSUM" \
     && php composer-setup.php --install-dir=/usr/local/bin --filename=composer \
@@ -76,7 +103,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends php-cli \
 # Gitleaks 설치 (v8.x)
 ARG GITLEAKS_VERSION=8.21.2
 ARG GITLEAKS_SHA256=5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
-RUN wget -q https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
+RUN download_with_retry "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
     && echo "${GITLEAKS_SHA256}  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum -c - \
     && tar -xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
     && mv gitleaks /usr/local/bin/ \
@@ -86,7 +113,7 @@ RUN wget -q https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_V
 # Trivy 설치
 ARG TRIVY_VERSION=0.58.0
 ARG TRIVY_SHA256=eb79a4da633be9c22ce8e9c73a78c0f57ffb077fb92cb1968aaf9c686a20c549
-RUN wget -q https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz \
+RUN download_with_retry "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
     && echo "${TRIVY_SHA256}  trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" | sha256sum -c - \
     && tar -xzf trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz \
     && mv trivy /usr/local/bin/ \
@@ -96,7 +123,7 @@ RUN wget -q https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VER
 # SonarQube Scanner 설치
 ARG SONAR_SCANNER_VERSION=6.2.1.4610
 ARG SONAR_SCANNER_SHA256=0b8a3049f0bd5de7abc1582c78c233960d3d4ed7cc983a1d1635e8552f8bb439
-RUN wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip \
+RUN download_with_retry "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip" "sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip" \
     && echo "${SONAR_SCANNER_SHA256}  sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip" | sha256sum -c - \
     && unzip -q sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip \
     && mv sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64 /opt/sonar-scanner \
@@ -110,7 +137,7 @@ ENV PATH="${SONAR_SCANNER_HOME}/bin:${PATH}"
 # Syft 설치 (SBOM 생성)
 ARG SYFT_VERSION=1.17.0
 ARG SYFT_SHA256=3485e831c21fd80b41fa3fc1f72e10367989b2d1aee082d642b5b0e658a02b44
-RUN wget -q https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz \
+RUN download_with_retry "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" "syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
     && echo "${SYFT_SHA256}  syft_${SYFT_VERSION}_linux_amd64.tar.gz" | sha256sum -c - \
     && tar -xzf syft_${SYFT_VERSION}_linux_amd64.tar.gz syft \
     && mv syft /usr/local/bin/syft \
