@@ -105,6 +105,7 @@ def test_main_sets_upload_sarif_env(monkeypatch):
     assert os.environ["INPUT_UPLOAD_SARIF"] == "true"
     assert os.environ["INPUT_SARIF_CATEGORY"] == "security-action"
     assert os.environ["INPUT_FAIL_ON_SARIF_UPLOAD_ERROR"] == "true"
+    assert os.environ["INPUT_PARALLEL"] == "false"
 
 
 def test_main_sets_ai_env(monkeypatch):
@@ -144,3 +145,4 @@ def test_main_sets_ai_env(monkeypatch):
     assert os.environ["INPUT_OPENAI_BASE_URL"] == "https://llm.example.local/v1"
     assert os.environ["OPENAI_BASE_URL"] == "https://llm.example.local/v1"
     assert os.environ["INPUT_USAGE_TRACKING"] == "true"
+    assert os.environ["INPUT_PARALLEL"] == "false"

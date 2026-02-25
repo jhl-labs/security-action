@@ -1,0 +1,17 @@
+description = "Roll out jhl-labs/security-action workflow with interactive intake"
+prompt = """
+Configure security-action in this repository.
+
+User input: {{args}}
+
+Follow this procedure:
+1. Ask only missing required inputs (runner, mode, upload-sarif, triggers, optional AI/Sonar/native/container/iac/sbom).
+2. If user says decide-for-me, use private defaults:
+   - upload-sarif: 'false'
+   - fail-on-findings: 'false'
+   - severity-threshold: 'high'
+   - triggers: pull_request + push on main
+3. Generate `.github/workflows/security-check.yaml` using `jhl-labs/security-action@main`.
+4. Include required permissions and explain why each is required.
+5. Output required secrets checklist.
+"""

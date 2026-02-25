@@ -155,6 +155,10 @@ inputs:
     description: '사용량 추적(기본: false, 외부 전송 없음)'
     required: false
     default: 'false'
+  parallel:
+    description: '스캐너 병렬 실행 여부 (기본: false)'
+    required: false
+    default: 'false'
 
 outputs:
   scan-results:
@@ -220,3 +224,4 @@ runs:
     INPUT_SARIF_CATEGORY: ${{ inputs.sarif-category }}
     INPUT_FAIL_ON_SARIF_UPLOAD_ERROR: ${{ inputs.fail-on-sarif-upload-error }}
     INPUT_USAGE_TRACKING: ${{ inputs.usage-tracking }}
+    INPUT_PARALLEL: ${{ inputs.parallel }}

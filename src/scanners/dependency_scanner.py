@@ -40,10 +40,14 @@ class DependencyScanner(BaseScanner):
             result = self.run_command(cmd)
 
             if result.returncode != 0:
-                # Trivy는 취약점이 있어도 exit 0 반환
-                # 실패 시에만 에러 처리
-                if "error" in result.stderr.lower():
-                    return False, [], f"Trivy failed: {result.stderr}"
+                # Trivy fs는 취약점 발견만으로 non-zero를 반환하지 않으므로
+                # non-zero는 런타임 실패로 간주한다.
+                error_output = (result.stderr or result.stdout or "").strip()
+                if not error_output:
+                    error_output = f"Trivy exited with code {result.returncode}"
+                if len(error_output) > 500:
+                    error_output = error_output[:500] + "..."
+                return False, [], f"Trivy failed (exit code {result.returncode}): {error_output}"
 
             # 결과 파싱
             report_file_path = Path(report_path)

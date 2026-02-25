@@ -6,8 +6,11 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
+from fnmatch import fnmatch
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console
@@ -106,6 +109,7 @@ class Config:
     sarif_category: str = "security-action"
     fail_on_sarif_upload_error: bool = False
     usage_tracking: bool = False
+    parallel: bool = False
     github_token: str | None = None
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -162,6 +166,7 @@ class Config:
                 os.getenv("INPUT_FAIL_ON_SARIF_UPLOAD_ERROR", "false")
             ),
             usage_tracking=str_to_bool(os.getenv("INPUT_USAGE_TRACKING", "false")),
+            parallel=str_to_bool(os.getenv("INPUT_PARALLEL", "false")),
             github_token=os.getenv("INPUT_GITHUB_TOKEN"),
             openai_api_key=os.getenv("INPUT_OPENAI_API_KEY"),
             anthropic_api_key=os.getenv("INPUT_ANTHROPIC_API_KEY"),
@@ -354,6 +359,48 @@ def print_findings_detail(results: list[ScanResult], config: Config) -> None:
         console.print(panel)
 
 
+def _serialize_scan_findings(result: ScanResult) -> list[dict[str, Any]]:
+    """Check Run 전송용 finding 직렬화."""
+    return [
+        {
+            "scanner": finding.scanner,
+            "rule_id": finding.rule_id,
+            "severity": finding.severity.value,
+            "message": finding.message,
+            "file_path": finding.file_path,
+            "line_start": finding.line_start,
+            "line_end": finding.line_end,
+            "suggestion": finding.suggestion,
+            "cwe": finding.metadata.get("cwe", "") if finding.metadata else "",
+            "metadata": finding.metadata or {},
+        }
+        for finding in result.findings
+    ]
+
+
+def _execute_scanner(
+    workspace: str,
+    scanner_name: str,
+    module_name: str,
+    class_name: str,
+    extra_config: dict[str, Any],
+) -> ScanResult:
+    """스캐너 모듈 로드 및 실행."""
+    try:
+        module = __import__(f"scanners.{module_name}", fromlist=[class_name])
+        scanner_class = getattr(module, class_name)
+        scanner = scanner_class(workspace, **extra_config)
+        return scanner.scan()
+    except Exception as e:
+        logger.exception("Error running scanner %s", scanner_name)
+        return ScanResult(
+            scanner=scanner_name,
+            success=False,
+            findings=[],
+            error=str(e),
+        )
+
+
 def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult]:
     """모든 스캐너 실행
 
@@ -416,71 +463,103 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
     if config.sonar_scan:
         scanners_to_run.append(("SonarQube", "sonar_scanner", "SonarScanner", "🔬", {}))
 
+    if not scanners_to_run:
+        console.print("[dim]No scanners enabled[/dim]")
+        return results
+
+    reporter_available = (
+        create_scanner_checks
+        and github_reporter is not None
+        and hasattr(github_reporter, "is_available")
+        and hasattr(github_reporter, "start_scanner_check")
+        and hasattr(github_reporter, "complete_scanner_check")
+        and github_reporter.is_available()
+    )
+
+    # 병렬 실행 경로
+    if config.parallel and len(scanners_to_run) > 1:
+        console.print("[bold cyan]⚡ Running scanners in parallel...[/bold cyan]")
+        if reporter_available:
+            for scanner_name, _, _, _, _ in scanners_to_run:
+                github_reporter.start_scanner_check(scanner_name)
+
+        max_workers = min(len(scanners_to_run), max(2, os.cpu_count() or 2))
+        ordered_results: dict[str, ScanResult] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_scanner = {
+                executor.submit(
+                    _execute_scanner,
+                    workspace,
+                    scanner_name,
+                    module_name,
+                    class_name,
+                    extra_config,
+                ): (scanner_name, icon)
+                for scanner_name, module_name, class_name, icon, extra_config in scanners_to_run
+            }
+
+            for future in as_completed(future_to_scanner):
+                scanner_name, icon = future_to_scanner[future]
+                result = future.result()
+                ordered_results[scanner_name] = result
+
+                if reporter_available:
+                    github_reporter.complete_scanner_check(
+                        scanner=scanner_name,
+                        findings=_serialize_scan_findings(result),
+                        execution_time=result.execution_time,
+                        error=result.error if not result.success else None,
+                    )
+                    console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+                else:
+                    status = "✓" if result.success else "✗"
+                    color = "green" if result.success else "red"
+                    console.print(
+                        f"  [{color}]{status}[/{color}] {icon} {scanner_name}: "
+                        f"{len(result.findings)} findings ({result.execution_time:.2f}s)"
+                    )
+
+        for scanner_name, _, _, _, _ in scanners_to_run:
+            if scanner_name in ordered_results:
+                results.append(ordered_results[scanner_name])
+            else:
+                results.append(
+                    ScanResult(
+                        scanner=scanner_name,
+                        success=False,
+                        findings=[],
+                        error="Scanner result missing from parallel execution",
+                    )
+                )
+
+        return results
+
+    # 순차 실행 경로
     for scanner_name, module_name, class_name, icon, extra_config in scanners_to_run:
         console.print(f"[bold cyan]{icon} Running {scanner_name}...[/bold cyan]")
 
-        # 개별 스캐너 Check Run 시작 (scanner_checks=true인 경우만)
-        if create_scanner_checks and github_reporter and github_reporter.is_available():
+        if reporter_available:
             github_reporter.start_scanner_check(scanner_name)
 
-        # 스캐너 동적 로드 및 실행
-        try:
-            module = __import__(f"scanners.{module_name}", fromlist=[class_name])
-            scanner_class = getattr(module, class_name)
-            scanner = scanner_class(workspace, **extra_config)
-            result = scanner.scan()
-            results.append(result)
+        result = _execute_scanner(workspace, scanner_name, module_name, class_name, extra_config)
+        results.append(result)
 
-            # 개별 스캐너 Check Run 완료 (scanner_checks=true인 경우만)
-            if create_scanner_checks and github_reporter and github_reporter.is_available():
-                findings_dict = [
-                    {
-                        "scanner": f.scanner,
-                        "rule_id": f.rule_id,
-                        "severity": f.severity.value,
-                        "message": f.message,
-                        "file_path": f.file_path,
-                        "line_start": f.line_start,
-                        "line_end": f.line_end,
-                        "suggestion": f.suggestion,
-                        "cwe": f.metadata.get("cwe", "") if f.metadata else "",
-                        "metadata": f.metadata or {},
-                    }
-                    for f in result.findings
-                ]
-                github_reporter.complete_scanner_check(
-                    scanner=scanner_name,
-                    findings=findings_dict,
-                    execution_time=result.execution_time,
-                    error=result.error if not result.success else None,
-                )
-                console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
-            else:
-                # 개별 Check Run 없이 결과만 출력
-                status = "✓" if result.success else "✗"
-                color = "green" if result.success else "red"
-                console.print(
-                    f"  [{color}]{status}[/{color}] {len(result.findings)} findings "
-                    f"({result.execution_time:.2f}s)"
-                )
-
-        except Exception as e:
-            console.print(f"[red]Error running {scanner_name}: {e}[/red]")
-            results.append(
-                ScanResult(
-                    scanner=scanner_name,
-                    success=False,
-                    findings=[],
-                    error=str(e),
-                )
+        if reporter_available:
+            github_reporter.complete_scanner_check(
+                scanner=scanner_name,
+                findings=_serialize_scan_findings(result),
+                execution_time=result.execution_time,
+                error=result.error if not result.success else None,
             )
-            # 에러 발생 시 Check Run 실패로 완료 (scanner_checks=true인 경우만)
-            if create_scanner_checks and github_reporter and github_reporter.is_available():
-                github_reporter.complete_scanner_check(
-                    scanner=scanner_name,
-                    findings=[],
-                    error=str(e),
-                )
+            console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+        else:
+            status = "✓" if result.success else "✗"
+            color = "green" if result.success else "red"
+            console.print(
+                f"  [{color}]{status}[/{color}] {len(result.findings)} findings "
+                f"({result.execution_time:.2f}s)"
+            )
 
     return results
 
@@ -703,6 +782,7 @@ def generate_reports(
     config: Config,
     ai_review_result: Any = None,
     github_reporter: Any = None,
+    scanner_runtime_errors: list[dict] | None = None,
 ) -> bool:
     """리포트 생성 (SARIF, GitHub PR 코멘트, Check Run)"""
     console.print("\n[bold cyan]📊 Generating Reports...[/bold cyan]")
@@ -832,6 +912,14 @@ def generate_reports(
                             github.create_pr_review(finding_comments)
                             console.print("  [green]✓[/green] PR review created")
 
+                    # 스캐너 실행 실패 요약 코멘트 (리포트 전용 모드에서 가시성 강화)
+                    if scanner_runtime_errors:
+                        comment_body = format_scanner_runtime_error_comment(scanner_runtime_errors)
+                        if github.create_pr_comment(comment_body):
+                            console.print(
+                                "  [yellow]⚠[/yellow] PR comment posted for scanner runtime errors"
+                            )
+
                 # Note: Summary Check Run 제거됨
                 # "Security scan results" Required Check가 이미 동일한 summary를 제공하므로
                 # 중복되는 "🛡️ Security Scan Summary" Check Run은 생성하지 않음
@@ -901,6 +989,213 @@ def print_workflow_annotations(findings: list[dict]) -> None:
     console.print(f"  [green]✓[/green] {len(findings)} annotations created")
 
 
+def collect_scanner_runtime_errors(results: list[ScanResult]) -> list[dict]:
+    """스캐너 런타임 실패 목록 추출."""
+    errors: list[dict] = []
+    for result in results:
+        if result.success:
+            continue
+        errors.append(
+            {
+                "scanner": result.scanner,
+                "message": (result.error or "Scanner execution failed").strip(),
+            }
+        )
+    return errors
+
+
+def print_scanner_runtime_error_annotations(scanner_errors: list[dict]) -> None:
+    """스캐너 런타임 실패를 GitHub Actions annotation으로 출력."""
+    if not scanner_errors:
+        return
+
+    console.print(
+        f"\n[bold yellow]⚠ Creating {len(scanner_errors)} scanner failure annotation(s)...[/bold yellow]"
+    )
+    for scanner_error in scanner_errors:
+        scanner = _escape_workflow_command_property(
+            str(scanner_error.get("scanner", "Unknown Scanner"))
+        )
+        message = _escape_workflow_command_data(
+            str(scanner_error.get("message", "Scanner execution failed"))
+        )
+        print(f"::error title=Scanner Failure ({scanner})::{message}")
+
+    console.print(
+        f"  [yellow]⚠[/yellow] {len(scanner_errors)} scanner failure annotation(s) created"
+    )
+
+
+def format_scanner_runtime_error_comment(scanner_errors: list[dict]) -> str:
+    """PR/이슈 코멘트용 스캐너 실패 요약 생성."""
+    lines = [
+        "## ⚠️ Scanner Runtime Errors",
+        "",
+        "One or more scanners failed to execute. Findings may be incomplete.",
+        "",
+    ]
+
+    for scanner_error in scanner_errors[:10]:
+        scanner = str(scanner_error.get("scanner", "Unknown Scanner"))
+        message = str(scanner_error.get("message", "Scanner execution failed")).strip()
+        if len(message) > 300:
+            message = message[:300] + "..."
+        lines.append(f"- **{scanner}**: {message}")
+
+    if len(scanner_errors) > 10:
+        lines.append(f"- ... and {len(scanner_errors) - 10} more scanner failure(s)")
+
+    lines.extend(
+        [
+            "",
+            "Please check the workflow logs for full stack traces and environment details.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def build_scanner_runtime_error_findings(scanner_errors: list[dict]) -> list[dict]:
+    """Required Check 결론 계산에 사용할 스캐너 실패 finding 생성."""
+    findings: list[dict] = []
+    for scanner_error in scanner_errors:
+        scanner = str(scanner_error.get("scanner", "Unknown Scanner")).strip() or "Unknown Scanner"
+        message = str(scanner_error.get("message", "Scanner execution failed")).strip()
+        if len(message) > 500:
+            message = message[:500] + "..."
+        findings.append(
+            {
+                "scanner": scanner,
+                "rule_id": "SCANNER_RUNTIME_FAILURE",
+                "severity": "critical",
+                "message": f"{scanner} failed to execute: {message}",
+                "file_path": "",
+                "line_start": 1,
+            }
+        )
+    return findings
+
+
+def load_yaml_runtime_config(config: Config, workspace: str) -> tuple[Any | None, str | None]:
+    """실행 시점 YAML 설정 파일 로드."""
+    try:
+        from config.loader import find_config_file, load_config
+    except ImportError:
+        return None, None
+
+    config_file: Path | None
+    if config.config_path:
+        config_file = Path(config.config_path).expanduser()
+        if not config_file.is_absolute():
+            config_file = Path(workspace) / config_file
+    else:
+        config_file = find_config_file(workspace)
+
+    if not config_file or not config_file.exists():
+        return None, None
+
+    try:
+        yaml_config = load_config(config_path=config_file, workspace=workspace)
+        return yaml_config, str(config_file)
+    except Exception as e:
+        logger.warning("Failed to load YAML config %s: %s", config_file, e)
+        return None, str(config_file)
+
+
+def _is_explicit_field(model: Any, field_name: str) -> bool:
+    """설정 모델에서 필드가 명시적으로 지정되었는지 확인."""
+    fields_set = getattr(model, "model_fields_set", None)
+    if fields_set is None:
+        return True
+    return field_name in fields_set
+
+
+def _is_explicit_nested_field(config_model: Any, section_name: str, field_name: str) -> bool:
+    """중첩 설정(section.field)이 명시적으로 지정되었는지 확인."""
+    section = getattr(config_model, section_name, None)
+    if section is None:
+        return False
+
+    root_fields_set = getattr(config_model, "model_fields_set", None)
+    if root_fields_set is not None and section_name not in root_fields_set:
+        return False
+
+    return _is_explicit_field(section, field_name)
+
+
+def _resolve_path_from_workspace(workspace: str, path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = Path(workspace) / path
+    return str(path)
+
+
+def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: str) -> None:
+    """YAML 설정을 런타임 Config에 반영."""
+    if _is_explicit_nested_field(yaml_config, "gitleaks", "enabled"):
+        config.secret_scan = bool(yaml_config.gitleaks.enabled)
+    if _is_explicit_nested_field(yaml_config, "semgrep", "enabled"):
+        config.code_scan = bool(yaml_config.semgrep.enabled)
+    if _is_explicit_nested_field(yaml_config, "trivy", "enabled"):
+        config.dependency_scan = bool(yaml_config.trivy.enabled)
+    if _is_explicit_nested_field(yaml_config, "ai_review", "enabled"):
+        config.ai_review = bool(yaml_config.ai_review.enabled)
+    if _is_explicit_nested_field(yaml_config, "reporting", "sarif_output"):
+        config.sarif_output = str(yaml_config.reporting.sarif_output)
+    if _is_explicit_nested_field(yaml_config, "reporting", "fail_on_findings"):
+        config.fail_on_findings = bool(yaml_config.reporting.fail_on_findings)
+    if _is_explicit_nested_field(yaml_config, "reporting", "fail_on_severity"):
+        fail_on_severity = str(yaml_config.reporting.fail_on_severity or "high")
+        try:
+            config.severity_threshold = Severity.from_string(fail_on_severity)
+        except ValueError:
+            logger.warning("Invalid fail_on_severity in YAML config: %s", fail_on_severity)
+
+    # 스캐너가 INPUT_* 값을 직접 참조하므로 필요한 설정은 env에도 반영.
+    if _is_explicit_nested_field(yaml_config, "gitleaks", "config_path"):
+        gitleaks_config_path = _resolve_path_from_workspace(workspace, yaml_config.gitleaks.config_path)
+        if gitleaks_config_path:
+            os.environ["INPUT_GITLEAKS_CONFIG"] = gitleaks_config_path
+    if _is_explicit_nested_field(yaml_config, "gitleaks", "baseline_path"):
+        gitleaks_baseline_path = _resolve_path_from_workspace(
+            workspace, yaml_config.gitleaks.baseline_path
+        )
+        if gitleaks_baseline_path:
+            os.environ["INPUT_GITLEAKS_BASELINE"] = gitleaks_baseline_path
+
+    if _is_explicit_nested_field(yaml_config, "ai_review", "enabled"):
+        os.environ["INPUT_AI_REVIEW"] = str(config.ai_review).lower()
+    if _is_explicit_nested_field(yaml_config, "ai_review", "provider") and yaml_config.ai_review.provider:
+        os.environ["INPUT_AI_PROVIDER"] = str(yaml_config.ai_review.provider)
+    if _is_explicit_nested_field(yaml_config, "ai_review", "model") and yaml_config.ai_review.model:
+        os.environ["INPUT_AI_MODEL"] = str(yaml_config.ai_review.model)
+
+
+def apply_global_excludes(
+    findings: list[dict], exclude_patterns: list[str] | None
+) -> tuple[list[dict], list[dict]]:
+    """global_excludes 패턴으로 결과 필터링."""
+    if not exclude_patterns:
+        return findings, []
+
+    filtered: list[dict] = []
+    suppressed: list[dict] = []
+
+    for finding in findings:
+        file_path = str(finding.get("file_path", "")).replace("\\", "/")
+        matched_pattern = next((p for p in exclude_patterns if fnmatch(file_path, p)), None)
+        if matched_pattern:
+            suppressed_finding = dict(finding)
+            suppressed_finding["suppress_reason"] = f"Matched global_excludes pattern: {matched_pattern}"
+            suppressed.append(suppressed_finding)
+        else:
+            filtered.append(finding)
+
+    return filtered, suppressed
+
+
 def should_fail(findings: list[dict], config: Config) -> bool:
     """필터링된 취약점 기준으로 실패 여부 판단"""
     if not config.fail_on_findings:
@@ -954,6 +1249,16 @@ def main() -> int:
 
     # 설정 로드
     config = Config.from_env()
+    workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+    yaml_config, yaml_config_path = load_yaml_runtime_config(config, workspace)
+    if yaml_config:
+        apply_yaml_runtime_overrides(config, yaml_config, workspace)
+        console.print(f"[dim]YAML config loaded: {yaml_config_path}[/dim]")
+    elif config.config_path:
+        console.print(
+            f"[yellow]⚠[/yellow] Config path not found or unreadable: {config.config_path}"
+        )
+
     console.print("[dim]Configuration loaded[/dim]")
     console.print(
         f"  Secret Scan: {config.secret_scan}"
@@ -977,6 +1282,7 @@ def main() -> int:
     console.print(f"  SARIF Upload: {config.upload_sarif} (category: {config.sarif_category})")
     console.print(f"  Fail on SARIF upload error: {config.fail_on_sarif_upload_error}")
     console.print(f"  Usage Tracking: {config.usage_tracking} (local-only)")
+    console.print(f"  Parallel Execution: {config.parallel}")
     console.print(f"  Scanner Checks: {config.scanner_checks}")
     console.print()
 
@@ -1010,6 +1316,7 @@ def main() -> int:
 
     # 스캐너 실행 (각 스캐너별 Check Run 생성)
     results = run_scanners(config, github_reporter)
+    scanner_runtime_errors = collect_scanner_runtime_errors(results)
 
     # AI 리뷰 실행 (AI Review Check Run 생성)
     ai_review_result = None
@@ -1039,16 +1346,28 @@ def main() -> int:
                 }
             )
 
-    # False Positive 필터링
+    # 설정 기반 필터링 (global_excludes + false_positives)
     suppressed_findings = []
+
+    if yaml_config and yaml_config.global_excludes:
+        all_findings, global_suppressed = apply_global_excludes(all_findings, yaml_config.global_excludes)
+        suppressed_findings.extend(global_suppressed)
+
+        if global_suppressed:
+            console.print(
+                f"\n[dim]ℹ️  {len(global_suppressed)} finding(s) suppressed by global_excludes[/dim]"
+            )
+            for sf in global_suppressed[:5]:
+                console.print(
+                    f"   [dim]- {sf.get('rule_id', 'Unknown')}: {sf.get('suppress_reason', 'No reason')}[/dim]"
+                )
+            if len(global_suppressed) > 5:
+                console.print(f"   [dim]... and {len(global_suppressed) - 5} more[/dim]")
+
     try:
         from config.false_positives import FalsePositiveManager, create_fp_rules_from_config
-        from config.loader import load_config as load_yaml_config
 
-        workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
-        yaml_config = load_yaml_config(config.config_path, workspace)
-
-        if yaml_config.false_positives:
+        if yaml_config and yaml_config.false_positives:
             fp_rules = create_fp_rules_from_config(
                 [fp.model_dump() for fp in yaml_config.false_positives]
             )
@@ -1059,18 +1378,19 @@ def main() -> int:
             fp_manager.load_baseline(baseline_path)
 
             # 필터링 적용
-            all_findings, suppressed_findings = fp_manager.filter_findings(all_findings)
+            all_findings, fp_suppressed = fp_manager.filter_findings(all_findings)
+            suppressed_findings.extend(fp_suppressed)
 
-            if suppressed_findings:
+            if fp_suppressed:
                 console.print(
-                    f"\n[dim]ℹ️  {len(suppressed_findings)} finding(s) suppressed by false positive rules[/dim]"
+                    f"\n[dim]ℹ️  {len(fp_suppressed)} finding(s) suppressed by false positive rules[/dim]"
                 )
-                for sf in suppressed_findings[:5]:
+                for sf in fp_suppressed[:5]:
                     console.print(
                         f"   [dim]- {sf.get('rule_id', 'Unknown')}: {sf.get('suppress_reason', 'No reason')}[/dim]"
                     )
-                if len(suppressed_findings) > 5:
-                    console.print(f"   [dim]... and {len(suppressed_findings) - 5} more[/dim]")
+                if len(fp_suppressed) > 5:
+                    console.print(f"   [dim]... and {len(fp_suppressed) - 5} more[/dim]")
 
             logger.info(
                 f"False positive filtering: {len(suppressed_findings)} suppressed, "
@@ -1083,6 +1403,7 @@ def main() -> int:
 
     # GitHub Actions 워크플로우 annotation 출력 (UI에 직접 표시)
     print_workflow_annotations(all_findings)
+    print_scanner_runtime_error_annotations(scanner_runtime_errors)
 
     # SBOM 생성
     if config.sbom_generate:
@@ -1090,7 +1411,6 @@ def main() -> int:
         try:
             from scanners.sbom_generator import generate_sbom
 
-            workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
             sbom_result = generate_sbom(
                 workspace=workspace,
                 output_format=config.sbom_format,
@@ -1113,7 +1433,12 @@ def main() -> int:
 
     # 리포팅
     sarif_upload_failed = generate_reports(
-        results, all_findings, config, ai_review_result, github_reporter
+        results,
+        all_findings,
+        config,
+        ai_review_result,
+        github_reporter,
+        scanner_runtime_errors=scanner_runtime_errors,
     )
 
     sarif_upload_blocking = (
@@ -1133,6 +1458,7 @@ def main() -> int:
     total_execution_time = time.time() - scan_start_time
 
     required_check_findings = list(all_findings)
+    required_check_findings.extend(build_scanner_runtime_error_findings(scanner_runtime_errors))
     if sarif_upload_blocking:
         required_check_findings.append(
             {

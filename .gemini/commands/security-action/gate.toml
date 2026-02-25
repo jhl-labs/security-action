@@ -1,0 +1,14 @@
+description = "Create blocking PR security gate workflow"
+prompt = """
+Create a blocking PR security gate workflow for this repo.
+
+User constraints: {{args}}
+
+Requirements:
+- trigger: pull_request on main unless user overrides
+- use `jhl-labs/security-action@main`
+- set `fail-on-findings: 'true'`
+- keep `upload-sarif: 'false'` unless user explicitly requests true
+- include permissions and a short secret checklist
+- write/update `.github/workflows/security-check.yaml`
+"""

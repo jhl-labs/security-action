@@ -200,6 +200,7 @@ def main() -> int:
     os.environ["INPUT_USAGE_TRACKING"] = str(args.usage_tracking).lower()
     os.environ["INPUT_SEVERITY_THRESHOLD"] = args.severity_threshold
     os.environ["INPUT_FAIL_ON_FINDINGS"] = str(not args.no_fail).lower()
+    os.environ["INPUT_PARALLEL"] = str(args.parallel).lower()
 
     if args.ai_model:
         os.environ["INPUT_AI_MODEL"] = args.ai_model

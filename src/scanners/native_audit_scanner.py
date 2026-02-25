@@ -159,7 +159,7 @@ class NativeAuditScanner(BaseScanner):
                 errors.append(error_msg)
 
         error = "; ".join(errors) if errors else None
-        return True, all_findings, error
+        return len(errors) == 0, all_findings, error
 
     def _run_audit(self, manager: str) -> list[Finding]:
         """특정 패키지 관리자의 audit 실행"""

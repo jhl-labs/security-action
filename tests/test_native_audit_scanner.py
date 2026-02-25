@@ -82,3 +82,22 @@ def test_run_pip_audit_falls_back_to_lock_file_directories(tmp_path, monkeypatch
 
     assert len(findings) == 1
     assert findings[0].file_path == "app/Pipfile.lock"
+
+
+def test_run_scan_returns_failure_when_audit_raises(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text("{}")
+
+    scanner = NativeAuditScanner(str(tmp_path), tools=["npm"])
+    monkeypatch.setattr(scanner, "_is_tool_available", lambda manager: True)
+
+    def fake_run_audit(manager):
+        raise RuntimeError("npm execution failed")
+
+    monkeypatch.setattr(scanner, "_run_audit", fake_run_audit)
+
+    success, findings, error = scanner._run_scan()
+
+    assert success is False
+    assert findings == []
+    assert error is not None
+    assert "npm audit failed" in error

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Security Action Rollout"
+  short_description: "Standardize and apply security-action across repos"
+  default_prompt: "Use $security-action-rollout to configure and rollout this security action across one or more repositories."

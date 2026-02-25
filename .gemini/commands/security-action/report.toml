@@ -1,0 +1,13 @@
+description = "Create report-only security scan workflow"
+prompt = """
+Create a report-only security scan workflow for this repo.
+
+User constraints: {{args}}
+
+Requirements:
+- use `jhl-labs/security-action@main`
+- set `fail-on-findings: 'false'`
+- set `upload-sarif: 'false'` by default
+- include permissions and a short secret checklist
+- write/update `.github/workflows/security-check.yaml`
+"""
