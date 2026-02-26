@@ -67,6 +67,7 @@ jobs:
           check-name: '🛡️ Security Report (Self-hosted)'
           severity-threshold: 'high'
           fail-on-findings: 'false'
+          verbose: 'true'
           post-summary: 'false'
           sarif-output: 'security-results.sarif'
           upload-sarif: 'false'
