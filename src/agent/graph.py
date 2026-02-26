@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Callable
+from urllib.parse import urlparse
 
 from langgraph.graph import END, StateGraph
 
@@ -13,6 +14,18 @@ from .nodes import (
     generate_summary_node,
 )
 from .state import AgentConfig, AgentState
+
+
+def _is_remote_insecure_http(url: str) -> bool:
+    """원격 HTTP URL 여부 확인 (localhost 제외)."""
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if scheme != "http":
+        return False
+
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    return host not in local_hosts
 
 
 def _bind_config(
@@ -123,12 +136,27 @@ def create_config_from_env() -> AgentConfig:
     else:
         provider = "openai"
 
+    if provider == "openai" and openai_key and openai_base_url:
+        if _is_remote_insecure_http(openai_base_url):
+            if provider_input == "auto" and anthropic_key:
+                provider = "anthropic"
+                # anthropic fallback 시 OpenAI 전용 설정은 비활성화한다.
+                openai_key = None
+                openai_base_url = ""
+            else:
+                raise ValueError(
+                    "Refusing OpenAI API key transmission over insecure HTTP "
+                    "openai-base-url. Use HTTPS (or localhost only)."
+                )
+
     default_model = "claude-3-5-sonnet-20241022" if provider == "anthropic" else "gpt-4o"
     model = model_input or default_model
 
     return AgentConfig(
         model_provider=provider,
         model_name=model,
+        openai_api_key=openai_key or None,
+        anthropic_api_key=anthropic_key or None,
         openai_base_url=openai_base_url or None,
         temperature=0.1,
         max_tokens=4096,

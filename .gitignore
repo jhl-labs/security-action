@@ -1,2 +1,7 @@
 *.pyc
 __pycache__/
+*.sarif
+sbom.json
+container-sbom.json
+.security-cache/
+.security-baseline.json

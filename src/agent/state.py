@@ -21,7 +21,8 @@ class ReviewSeverity(str, Enum):
 class ReviewCategory(str, Enum):
     """리뷰 카테고리"""
 
-    SECRET_EXPOSURE = "secret_exposure"
+    # Bandit B105 false-positive: category label string, not secret material.
+    SECRET_EXPOSURE = "secret_exposure"  # nosec B105
     SQL_INJECTION = "sql_injection"
     XSS = "xss"
     COMMAND_INJECTION = "command_injection"
@@ -110,6 +111,8 @@ class AgentConfig(BaseModel):
 
     model_provider: str = "openai"  # openai, anthropic
     model_name: str = "gpt-4o"
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
     openai_base_url: str | None = None
     temperature: float = 0.1
     max_tokens: int = 4096
