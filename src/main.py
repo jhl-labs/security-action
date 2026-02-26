@@ -4,10 +4,12 @@
 import json
 import logging
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
@@ -27,6 +29,59 @@ logging.basicConfig(
 logger = logging.getLogger("security-action")
 
 console = Console()
+
+MAX_WORKFLOW_ANNOTATION_MESSAGE_LENGTH = 2000
+MAX_SCANNER_ERROR_MESSAGE_LENGTH = 500
+
+
+def _env_to_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _configure_runtime_verbosity() -> tuple[bool, bool]:
+    """런타임 verbosity(quiet/verbose) 적용."""
+    verbose = _env_to_bool("INPUT_VERBOSE", default=False)
+    quiet = _env_to_bool("INPUT_QUIET", default=False)
+
+    # quiet가 verbose보다 우선한다.
+    if quiet:
+        console.quiet = True
+        logging.getLogger().setLevel(logging.WARNING)
+        logger.setLevel(logging.WARNING)
+    elif verbose:
+        console.quiet = False
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+    else:
+        console.quiet = False
+        logging.getLogger().setLevel(logging.INFO)
+        logger.setLevel(logging.INFO)
+
+    return verbose, quiet
+
+
+def _get_workspace(default: str | None = None) -> str:
+    """실행 워크스페이스 경로를 안전하게 해석한다.
+
+    - `GITHUB_WORKSPACE`가 비어 있거나 미설정이면 fallback(default 또는 cwd) 사용
+    - 항상 절대 경로로 정규화
+    """
+    raw_workspace = os.getenv("GITHUB_WORKSPACE")
+    workspace = str(raw_workspace).strip() if isinstance(raw_workspace, str) else ""
+    if not workspace:
+        workspace = default or os.getcwd()
+
+    workspace_norm = workspace.replace("\\", "/").strip()
+    if _is_windows_absolute_path(workspace_norm):
+        return workspace_norm.rstrip("/")
+
+    try:
+        return str(Path(workspace).expanduser().resolve(strict=False))
+    except Exception:
+        return str(Path(default or os.getcwd()).resolve(strict=False))
 
 
 class Severity(str, Enum):
@@ -105,6 +160,7 @@ class Config:
     severity_threshold: Severity = Severity.HIGH
     fail_on_findings: bool = True
     sarif_output: str = "security-results.sarif"
+    json_output: str | None = None
     upload_sarif: bool = False
     sarif_category: str = "security-action"
     fail_on_sarif_upload_error: bool = False
@@ -119,8 +175,8 @@ class Config:
     def from_env(cls) -> "Config":
         """환경 변수에서 설정 로드"""
 
-        def str_to_bool(value: str) -> bool:
-            return value.lower() in ("true", "1", "yes")
+        def str_to_bool(value: str | bool | None) -> bool:
+            return str(value).strip().lower() in {"true", "1", "yes", "on"}
 
         iac_frameworks_str = os.getenv("INPUT_IAC_FRAMEWORKS", "")
         iac_frameworks = [f.strip() for f in iac_frameworks_str.split(",") if f.strip()] or None
@@ -129,6 +185,31 @@ class Config:
         native_audit_tools = [
             t.strip() for t in native_audit_tools_str.split(",") if t.strip()
         ] or ["auto"]
+
+        severity_raw = os.getenv("INPUT_SEVERITY_THRESHOLD", "high")
+        try:
+            severity_threshold = Severity.from_string(severity_raw)
+        except ValueError:
+            logger.warning(
+                "Invalid INPUT_SEVERITY_THRESHOLD=%r, falling back to 'high'",
+                severity_raw,
+            )
+            severity_threshold = Severity.HIGH
+
+        sbom_output = (os.getenv("INPUT_SBOM_OUTPUT") or "").strip() or "sbom.json"
+        sarif_output = (os.getenv("INPUT_SARIF_OUTPUT") or "").strip() or "security-results.sarif"
+
+        json_output_raw = os.getenv("INPUT_JSON_OUTPUT")
+        json_output = json_output_raw.strip() if isinstance(json_output_raw, str) else None
+        if not json_output:
+            json_output = None
+
+        sarif_category = (os.getenv("INPUT_SARIF_CATEGORY") or "").strip() or "security-action"
+
+        config_path_raw = os.getenv("INPUT_CONFIG_PATH")
+        config_path = config_path_raw.strip() if isinstance(config_path_raw, str) else None
+        if not config_path:
+            config_path = None
 
         return cls(
             # 기본 스캐너
@@ -147,7 +228,7 @@ class Config:
             # SBOM
             sbom_generate=str_to_bool(os.getenv("INPUT_SBOM_GENERATE", "false")),
             sbom_format=os.getenv("INPUT_SBOM_FORMAT", "cyclonedx-json"),
-            sbom_output=os.getenv("INPUT_SBOM_OUTPUT", "sbom.json"),
+            sbom_output=sbom_output,
             # SonarQube
             sonar_scan=str_to_bool(os.getenv("INPUT_SONAR_SCAN", "false")),
             # AI 리뷰
@@ -157,20 +238,22 @@ class Config:
             skip_check=str_to_bool(os.getenv("INPUT_SKIP_CHECK", "false")),
             scanner_checks=str_to_bool(os.getenv("INPUT_SCANNER_CHECKS", "false")),
             post_summary=str_to_bool(os.getenv("INPUT_POST_SUMMARY", "true")),
-            severity_threshold=Severity.from_string(os.getenv("INPUT_SEVERITY_THRESHOLD", "high")),
+            severity_threshold=severity_threshold,
             fail_on_findings=str_to_bool(os.getenv("INPUT_FAIL_ON_FINDINGS", "true")),
-            sarif_output=os.getenv("INPUT_SARIF_OUTPUT", "security-results.sarif"),
+            sarif_output=sarif_output,
+            json_output=json_output,
             upload_sarif=str_to_bool(os.getenv("INPUT_UPLOAD_SARIF", "false")),
-            sarif_category=os.getenv("INPUT_SARIF_CATEGORY", "security-action"),
+            sarif_category=sarif_category,
             fail_on_sarif_upload_error=str_to_bool(
                 os.getenv("INPUT_FAIL_ON_SARIF_UPLOAD_ERROR", "false")
             ),
             usage_tracking=str_to_bool(os.getenv("INPUT_USAGE_TRACKING", "false")),
             parallel=str_to_bool(os.getenv("INPUT_PARALLEL", "false")),
             github_token=os.getenv("INPUT_GITHUB_TOKEN"),
-            openai_api_key=os.getenv("INPUT_OPENAI_API_KEY"),
-            anthropic_api_key=os.getenv("INPUT_ANTHROPIC_API_KEY"),
-            config_path=os.getenv("INPUT_CONFIG_PATH"),
+            openai_api_key=os.getenv("INPUT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+            anthropic_api_key=os.getenv("INPUT_ANTHROPIC_API_KEY")
+            or os.getenv("ANTHROPIC_API_KEY"),
+            config_path=config_path,
         )
 
 
@@ -178,16 +261,16 @@ def set_github_output(name: str, value: str) -> None:
     """GitHub Actions 출력 설정"""
     value_str = str(value)
     github_output = os.getenv("GITHUB_OUTPUT")
-    if github_output:
-        delimiter = "EOF_SECURITY_ACTION"
-        while delimiter in value_str:
-            delimiter += "_X"
+    if not github_output:
+        logger.debug("GITHUB_OUTPUT not set; skipping output: %s", name)
+        return
 
-        with open(github_output, "a", encoding="utf-8") as f:
-            f.write(f"{name}<<{delimiter}\n{value_str}\n{delimiter}\n")
-    else:
-        escaped_value = value_str.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-        print(f"::set-output name={name}::{escaped_value}")
+    delimiter = "EOF_SECURITY_ACTION"
+    while delimiter in value_str:
+        delimiter += "_X"
+
+    with open(github_output, "a", encoding="utf-8") as f:
+        f.write(f"{name}<<{delimiter}\n{value_str}\n{delimiter}\n")
 
 
 def _escape_workflow_command_data(value: str) -> str:
@@ -206,6 +289,101 @@ def _safe_positive_int(value: Any, default: int = 1) -> int:
         return max(1, int(value))
     except (TypeError, ValueError):
         return max(1, default)
+
+
+def _resolve_report_output_path(path_value: str, workspace: str) -> Path:
+    """리포트 출력 경로를 해석한다.
+
+    - relative 경로는 workspace 기준으로 해석
+    - GitHub Actions 환경에서는 workspace 외부 경로 쓰기를 차단
+    """
+    raw_path = Path(path_value).expanduser()
+    workspace_path = Path(workspace).resolve(strict=False)
+
+    if raw_path.is_absolute():
+        resolved = raw_path.resolve(strict=False)
+    else:
+        resolved = (workspace_path / raw_path).resolve(strict=False)
+
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+        if not (resolved == workspace_path or workspace_path in resolved.parents):
+            raise ValueError(f"Output path must stay within workspace: {path_value}")
+
+    return resolved
+
+
+def _format_output_path_for_display(
+    original_value: str, resolved_path: Path, workspace: str
+) -> str:
+    """사용자 표시/액션 output용 경로 문자열 생성."""
+    original = str(original_value or "").strip()
+    if original and not Path(original).is_absolute():
+        return original
+
+    workspace_path = Path(workspace).resolve(strict=False)
+    if resolved_path == workspace_path or workspace_path in resolved_path.parents:
+        return str(resolved_path.relative_to(workspace_path))
+
+    return str(resolved_path)
+
+
+def _is_windows_absolute_path(path: str) -> bool:
+    """Windows 절대경로 여부 확인 (예: C:/repo/file.py)."""
+    return len(path) >= 3 and path[1] == ":" and path[2] == "/"
+
+
+def _strip_workspace_prefix(path: str, workspace_norm: str) -> str:
+    """워크스페이스 prefix를 제거해 상대 경로로 변환."""
+    if not workspace_norm:
+        return path
+
+    if path == workspace_norm:
+        return ""
+    if path.startswith(workspace_norm + "/"):
+        return path[len(workspace_norm) + 1 :]
+
+    # Windows는 드라이브 문자 대소문자를 무시해 비교한다.
+    if _is_windows_absolute_path(path) and _is_windows_absolute_path(workspace_norm):
+        path_fold = path.casefold()
+        workspace_fold = workspace_norm.casefold()
+        if path_fold == workspace_fold:
+            return ""
+        if path_fold.startswith(workspace_fold + "/"):
+            return path[len(workspace_norm) + 1 :]
+
+    return path
+
+
+def _normalize_workflow_annotation_path(raw_path: str, workspace: str = "") -> str | None:
+    """Workflow annotation 파일 경로를 정규화한다."""
+    path = str(raw_path or "").strip().replace("\\", "/")
+    if not path:
+        return None
+
+    if path.startswith("file://"):
+        path = path[7:]
+
+    workspace_norm = str(workspace or "").strip().replace("\\", "/").rstrip("/")
+    path = _strip_workspace_prefix(path, workspace_norm)
+
+    if path.startswith("/"):
+        # workspace 외부 절대경로는 annotation 대상에서 제외
+        return None
+
+    while path.startswith("./"):
+        path = path[2:]
+
+    # Windows absolute path (e.g. C:/repo/file.py)
+    if _is_windows_absolute_path(path):
+        return None
+
+    parts = [segment for segment in path.split("/") if segment not in ("", ".")]
+    if not parts:
+        return None
+    if any(segment == ".." for segment in parts):
+        return None
+
+    return "/".join(parts)
 
 
 def print_banner() -> None:
@@ -239,7 +417,10 @@ def print_scan_summary(results: list[ScanResult], config: Config) -> None:
     table.add_column("Time", justify="right")
 
     for result in results:
-        status = "✅ Success" if result.success else f"❌ Failed: {result.error}"
+        if result.success:
+            status = "✅ Success"
+        else:
+            status = f"❌ Failed: {_sanitize_runtime_error_message(result.error)}"
         table.add_row(
             result.scanner,
             status,
@@ -279,11 +460,6 @@ def print_scan_summary(results: list[ScanResult], config: Config) -> None:
 
     console.print(severity_table)
 
-    # GitHub Actions 출력 설정
-    set_github_output("findings-count", str(len(all_findings)))
-    set_github_output("critical-count", str(severity_counts[Severity.CRITICAL]))
-    set_github_output("high-count", str(severity_counts[Severity.HIGH]))
-
 
 def print_findings_detail(results: list[ScanResult], config: Config) -> None:
     """발견된 취약점 상세 출력"""
@@ -292,7 +468,15 @@ def print_findings_detail(results: list[ScanResult], config: Config) -> None:
         all_findings.extend(result.findings)
 
     if not all_findings:
-        console.print("\n[green]No security issues found![/green]\n")
+        failed_scanners = [result.scanner for result in results if not result.success]
+        if failed_scanners:
+            console.print(
+                "\n[yellow]No findings reported, but some scanners failed. "
+                "Results may be incomplete.[/yellow]"
+            )
+            console.print(f"[dim]Failed scanners: {', '.join(failed_scanners)}[/dim]\n")
+        else:
+            console.print("\n[green]No security issues found![/green]\n")
         return
 
     # 심각도 순으로 정렬
@@ -357,6 +541,22 @@ def print_findings_detail(results: list[ScanResult], config: Config) -> None:
         console.print(panel)
 
 
+def set_findings_count_outputs(findings: list[dict[str, Any]]) -> None:
+    """필터링 완료된 finding 기준으로 GitHub 출력 카운트를 기록한다."""
+    severity_counts = {severity: 0 for severity in Severity}
+    for finding in findings:
+        severity_str = str(finding.get("severity", "info")).lower()
+        try:
+            severity = Severity.from_string(severity_str)
+        except ValueError:
+            severity = Severity.INFO
+        severity_counts[severity] += 1
+
+    set_github_output("findings-count", str(len(findings)))
+    set_github_output("critical-count", str(severity_counts[Severity.CRITICAL]))
+    set_github_output("high-count", str(severity_counts[Severity.HIGH]))
+
+
 def _serialize_scan_findings(result: ScanResult) -> list[dict[str, Any]]:
     """Check Run 전송용 finding 직렬화."""
     return [
@@ -399,6 +599,14 @@ def _execute_scanner(
         )
 
 
+def _sanitize_runtime_error_message(error: str | None) -> str:
+    """스캐너 실패 메시지를 UI/리포팅 노출용으로 정규화."""
+    return _truncate_text(
+        _redact_sensitive_text((error or "Scanner execution failed").strip()),
+        MAX_SCANNER_ERROR_MESSAGE_LENGTH,
+    )
+
+
 def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult]:
     """모든 스캐너 실행
 
@@ -410,7 +618,7 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
         스캔 결과 목록
     """
     results: list[ScanResult] = []
-    workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+    workspace = _get_workspace()
 
     console.print(f"[dim]Scanning directory: {workspace}[/dim]\n")
 
@@ -503,13 +711,20 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
                 ordered_results[scanner_name] = result
 
                 if reporter_available:
-                    github_reporter.complete_scanner_check(
+                    updated = github_reporter.complete_scanner_check(
                         scanner=scanner_name,
                         findings=_serialize_scan_findings(result),
                         execution_time=result.execution_time,
-                        error=result.error if not result.success else None,
+                        error=_sanitize_runtime_error_message(result.error)
+                        if not result.success
+                        else None,
                     )
-                    console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+                    if updated:
+                        console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+                    else:
+                        console.print(
+                            f"  [yellow]⚠[/yellow] {scanner_name} Check Run update failed"
+                        )
                 else:
                     status = "✓" if result.success else "✗"
                     color = "green" if result.success else "red"
@@ -544,13 +759,16 @@ def run_scanners(config: Config, github_reporter: Any = None) -> list[ScanResult
         results.append(result)
 
         if reporter_available:
-            github_reporter.complete_scanner_check(
+            updated = github_reporter.complete_scanner_check(
                 scanner=scanner_name,
                 findings=_serialize_scan_findings(result),
                 execution_time=result.execution_time,
-                error=result.error if not result.success else None,
+                error=_sanitize_runtime_error_message(result.error) if not result.success else None,
             )
-            console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+            if updated:
+                console.print(f"  [green]✓[/green] {scanner_name} Check Run updated")
+            else:
+                console.print(f"  [yellow]⚠[/yellow] {scanner_name} Check Run update failed")
         else:
             status = "✓" if result.success else "✗"
             color = "green" if result.success else "red"
@@ -566,6 +784,7 @@ def run_ai_review(
     results: list[ScanResult],
     config: Config,
     github_reporter: Any = None,
+    prefiltered_findings: list[dict] | None = None,
 ) -> Any:
     """AI 기반 보안 리뷰 실행
 
@@ -573,6 +792,7 @@ def run_ai_review(
         results: 스캔 결과 목록
         config: 액션 설정
         github_reporter: GitHubReporter 인스턴스 (Check Run 업데이트용)
+        prefiltered_findings: 필터링된 finding 목록(있으면 우선 사용)
 
     Returns:
         AI 리뷰 결과 상태
@@ -585,21 +805,24 @@ def run_ai_review(
         console.print("[dim]Set openai-api-key or anthropic-api-key to enable AI review.[/dim]")
         return None
 
-    # findings 수집
-    all_findings = []
-    for result in results:
-        for finding in result.findings:
-            all_findings.append(
-                {
-                    "scanner": finding.scanner,
-                    "rule_id": finding.rule_id,
-                    "severity": finding.severity.value,
-                    "message": finding.message,
-                    "file_path": finding.file_path,
-                    "line_start": finding.line_start,
-                    "line_end": finding.line_end,
-                }
-            )
+    # findings 수집 (필터링 결과가 있으면 우선 사용)
+    if prefiltered_findings is not None:
+        all_findings = [dict(finding) for finding in prefiltered_findings]
+    else:
+        all_findings = []
+        for result in results:
+            for finding in result.findings:
+                all_findings.append(
+                    {
+                        "scanner": finding.scanner,
+                        "rule_id": finding.rule_id,
+                        "severity": finding.severity.value,
+                        "message": finding.message,
+                        "file_path": finding.file_path,
+                        "line_start": finding.line_start,
+                        "line_end": finding.line_end,
+                    }
+                )
 
     if not all_findings:
         console.print("[green]No findings to review.[/green]")
@@ -609,7 +832,15 @@ def run_ai_review(
 
     # AI Review Check Run 시작 (scanner_checks=true인 경우만)
     create_scanner_checks = config.scanner_checks
-    if create_scanner_checks and github_reporter and github_reporter.is_available():
+    reporter_available = (
+        create_scanner_checks
+        and github_reporter is not None
+        and hasattr(github_reporter, "is_available")
+        and hasattr(github_reporter, "start_ai_review_check")
+        and hasattr(github_reporter, "complete_ai_review_check")
+        and github_reporter.is_available()
+    )
+    if reporter_available:
         github_reporter.start_ai_review_check()
 
     start_time = time.time()
@@ -617,7 +848,7 @@ def run_ai_review(
     try:
         from agent import run_security_review
 
-        workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+        workspace = _get_workspace()
         state = run_security_review(
             findings=all_findings,
             workspace_path=workspace,
@@ -626,12 +857,13 @@ def run_ai_review(
         execution_time = time.time() - start_time
 
         if state.error:
-            console.print(f"[red]AI Review error: {state.error}[/red]")
+            sanitized_error = _sanitize_runtime_error_message(state.error)
+            console.print(f"[red]AI Review error: {sanitized_error}[/red]")
             # Check Run 실패로 완료 (scanner_checks=true인 경우만)
-            if create_scanner_checks and github_reporter and github_reporter.is_available():
+            if reporter_available:
                 github_reporter.complete_ai_review_check(
                     reviews=[],
-                    error=state.error,
+                    error=sanitized_error,
                     execution_time=execution_time,
                 )
             return None
@@ -640,7 +872,7 @@ def run_ai_review(
         print_ai_review_results(state)
 
         # AI Review Check Run 완료 (scanner_checks=true인 경우만)
-        if create_scanner_checks and github_reporter and github_reporter.is_available():
+        if reporter_available:
             reviews_dict = []
             if hasattr(state, "reviews") and state.reviews:
                 for review in state.reviews:
@@ -681,21 +913,23 @@ def run_ai_review(
 
     except ImportError as e:
         execution_time = time.time() - start_time
-        console.print(f"[yellow]AI Review dependencies not available: {e}[/yellow]")
-        if create_scanner_checks and github_reporter and github_reporter.is_available():
+        sanitized_error = _sanitize_runtime_error_message(f"Dependencies not available: {e}")
+        console.print(f"[yellow]AI Review dependencies not available: {sanitized_error}[/yellow]")
+        if reporter_available:
             github_reporter.complete_ai_review_check(
                 reviews=[],
-                error=f"Dependencies not available: {e}",
+                error=sanitized_error,
                 execution_time=execution_time,
             )
         return None
     except Exception as e:
         execution_time = time.time() - start_time
-        console.print(f"[red]AI Review failed: {e}[/red]")
-        if create_scanner_checks and github_reporter and github_reporter.is_available():
+        sanitized_error = _sanitize_runtime_error_message(str(e))
+        console.print(f"[red]AI Review failed: {sanitized_error}[/red]")
+        if reporter_available:
             github_reporter.complete_ai_review_check(
                 reviews=[],
-                error=str(e),
+                error=sanitized_error,
                 execution_time=execution_time,
             )
         return None
@@ -787,6 +1021,8 @@ def generate_reports(
 
     sarif_generated = False
     sarif_upload_failed = False
+    workspace = _get_workspace()
+    resolved_sarif_output: Path | None = None
 
     # SARIF 리포트 생성
     try:
@@ -805,15 +1041,67 @@ def generate_reports(
                 suggestion=finding.get("suggestion"),
             )
 
-        sarif.save(config.sarif_output)
+        resolved_sarif_output = _resolve_report_output_path(config.sarif_output, workspace)
+        resolved_sarif_output.parent.mkdir(parents=True, exist_ok=True)
+        sarif.save(str(resolved_sarif_output))
         sarif_generated = True
-        console.print(f"  [green]✓[/green] SARIF report saved: {config.sarif_output}")
-        set_github_output("sarif-file", config.sarif_output)
+        sarif_display_path = _format_output_path_for_display(
+            config.sarif_output, resolved_sarif_output, workspace
+        )
+        console.print(f"  [green]✓[/green] SARIF report saved: {sarif_display_path}")
+        set_github_output("sarif-file", sarif_display_path)
 
     except Exception as e:
         console.print(f"  [yellow]⚠[/yellow] SARIF generation failed: {e}")
         if config.upload_sarif:
             sarif_upload_failed = True
+
+    # 스캔 결과 요약(공통)
+    scan_results = [
+        {
+            "scanner": r.scanner,
+            "success": r.success,
+            "findings_count": len(r.findings),
+            "time": f"{r.execution_time:.2f}s",
+        }
+        for r in results
+    ]
+    ai_summary = None
+    if ai_review_result and hasattr(ai_review_result, "summary"):
+        ai_summary = ai_review_result.summary
+
+    # JSON 리포트 생성 (CLI/로컬 UX 보강)
+    if config.json_output:
+        try:
+            output_path = _resolve_report_output_path(config.json_output, workspace)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            severity_counts: dict[str, int] = {}
+            for finding in all_findings:
+                severity = str(finding.get("severity", "unknown")).lower()
+                severity_counts[severity] = severity_counts.get(severity, 0) + 1
+
+            json_report = {
+                "version": "1.0",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": {
+                    "total_findings": len(all_findings),
+                    "severity_counts": severity_counts,
+                },
+                "scan_results": scan_results,
+                "findings": all_findings,
+            }
+
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(json_report, f, ensure_ascii=False, indent=2)
+
+            json_display_path = _format_output_path_for_display(
+                config.json_output, output_path, workspace
+            )
+            console.print(f"  [green]✓[/green] JSON report saved: {json_display_path}")
+            set_github_output("json-file", json_display_path)
+        except Exception as e:
+            console.print(f"  [yellow]⚠[/yellow] JSON report generation failed: {e}")
 
     # GitHub 리포팅
     if config.github_token:
@@ -829,8 +1117,11 @@ def generate_reports(
 
             # upload-sarif=true면 GitHub Security(Code Scanning)로 직접 업로드
             if sarif_generated and config.upload_sarif:
+                sarif_upload_path = (
+                    str(resolved_sarif_output) if resolved_sarif_output else config.sarif_output
+                )
                 upload_result = github.upload_sarif(
-                    sarif_path=config.sarif_output,
+                    sarif_path=sarif_upload_path,
                     category=config.sarif_category,
                 )
                 if upload_result.success:
@@ -847,21 +1138,6 @@ def generate_reports(
                     )
 
             if github.is_available():
-                # 스캔 결과 요약
-                scan_results = [
-                    {
-                        "scanner": r.scanner,
-                        "success": r.success,
-                        "findings_count": len(r.findings),
-                        "time": f"{r.execution_time:.2f}s",
-                    }
-                    for r in results
-                ]
-
-                ai_summary = None
-                if ai_review_result and hasattr(ai_review_result, "summary"):
-                    ai_summary = ai_review_result.summary
-
                 # Job Summary 생성 (post_summary=true인 경우만)
                 if config.post_summary:
                     github.post_summary(all_findings, scan_results, ai_summary)
@@ -959,22 +1235,35 @@ def print_workflow_annotations(findings: list[dict]) -> None:
         "info": "notice",
     }
 
-    console.print(f"\n[bold cyan]📝 Creating {len(findings)} workflow annotations...[/bold cyan]")
+    console.print("\n[bold cyan]📝 Creating workflow annotations...[/bold cyan]")
+
+    created = 0
+    workspace = _get_workspace()
 
     for finding in findings:
         severity = finding.get("severity", "medium").lower()
         level = level_map.get(severity, "warning")
 
-        file_path = _escape_workflow_command_property(str(finding.get("file_path", "")))
+        raw_file_path = str(finding.get("file_path", "")).strip()
+        if not raw_file_path:
+            continue
+
+        normalized_path = _normalize_workflow_annotation_path(raw_file_path, workspace)
+        if not normalized_path:
+            continue
+
+        file_path = _escape_workflow_command_property(normalized_path)
         line_start = _safe_positive_int(finding.get("line_start"), default=1)
         line_end = _safe_positive_int(finding.get("line_end"), default=line_start)
         line_end = max(line_start, line_end)
 
         rule_id = finding.get("rule_id", "unknown")
         scanner = finding.get("scanner", "unknown")
-        message = _escape_workflow_command_data(
-            str(finding.get("message", "Security issue detected"))
+        message_text = _truncate_text(
+            _redact_sensitive_text(str(finding.get("message", "Security issue detected"))),
+            MAX_WORKFLOW_ANNOTATION_MESSAGE_LENGTH,
         )
+        message = _escape_workflow_command_data(message_text)
 
         # GitHub Actions workflow command 출력
         # 형식: ::{level} file={path},line={line},endLine={endLine},title={title}::{message}
@@ -983,8 +1272,9 @@ def print_workflow_annotations(findings: list[dict]) -> None:
             f"title={_escape_workflow_command_property(f'[{scanner}] {rule_id}')}::{message}"
         )
         print(annotation)
+        created += 1
 
-    console.print(f"  [green]✓[/green] {len(findings)} annotations created")
+    console.print(f"  [green]✓[/green] {created} annotations created")
 
 
 def collect_scanner_runtime_errors(results: list[ScanResult]) -> list[dict]:
@@ -993,13 +1283,51 @@ def collect_scanner_runtime_errors(results: list[ScanResult]) -> list[dict]:
     for result in results:
         if result.success:
             continue
+        sanitized_message = _sanitize_runtime_error_message(result.error)
         errors.append(
             {
                 "scanner": result.scanner,
-                "message": (result.error or "Scanner execution failed").strip(),
+                "message": sanitized_message,
             }
         )
     return errors
+
+
+def _redact_sensitive_text(value: str) -> str:
+    """로그/코멘트 노출 전에 민감정보를 마스킹한다."""
+    text = str(value or "")
+    if not text:
+        return ""
+
+    redacted = text
+    redacted = re.sub(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        "***REDACTED_PRIVATE_KEY***",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(r"(?i)\b(authorization)\s*:\s*bearer\s+[^\s]+", r"\1: Bearer ***", redacted)
+    redacted = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{8,}", "Bearer ***", redacted)
+    redacted = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b", "***", redacted)
+    redacted = re.sub(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "***", redacted)
+    redacted = re.sub(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{12,}\b", "***", redacted)
+    redacted = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "***", redacted)
+    redacted = re.sub(
+        r"(?i)\b(api[_-]?key|token|password|secret)\b\s*[:=]\s*([^\s,;]+)",
+        r"\1=***",
+        redacted,
+    )
+    return redacted
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    """텍스트를 지정 길이로 제한한다."""
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
 
 
 def print_scanner_runtime_error_annotations(scanner_errors: list[dict]) -> None:
@@ -1086,8 +1414,19 @@ def load_yaml_runtime_config(config: Config, workspace: str) -> tuple[Any | None
         config_file = Path(config.config_path).expanduser()
         if not config_file.is_absolute():
             config_file = Path(workspace) / config_file
+        config_file = config_file.resolve(strict=False)
     else:
         config_file = find_config_file(workspace)
+        if config_file is not None:
+            config_file = config_file.resolve(strict=False)
+
+    if (
+        config_file
+        and os.getenv("GITHUB_ACTIONS", "").lower() == "true"
+        and not _is_within_workspace(config_file, Path(workspace).resolve(strict=False))
+    ):
+        logger.warning("Ignoring config path outside workspace in GitHub Actions: %s", config_file)
+        return None, str(config_file)
 
     if not config_file or not config_file.exists():
         return None, None
@@ -1124,10 +1463,36 @@ def _is_explicit_nested_field(config_model: Any, section_name: str, field_name: 
 def _resolve_path_from_workspace(workspace: str, path_value: str | None) -> str | None:
     if not path_value:
         return None
+    workspace_path = Path(workspace).resolve(strict=False)
     path = Path(path_value).expanduser()
     if not path.is_absolute():
-        path = Path(workspace) / path
-    return str(path)
+        path = workspace_path / path
+    resolved = path.resolve(strict=False)
+
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true" and not _is_within_workspace(
+        resolved, workspace_path
+    ):
+        logger.warning("Ignoring path outside workspace in GitHub Actions: %s", path_value)
+        return None
+
+    return str(resolved)
+
+
+def _is_within_workspace(path: Path, workspace_path: Path) -> bool:
+    """경로가 workspace 내부(또는 동일 경로)인지 확인."""
+    if path == workspace_path or workspace_path in path.parents:
+        return True
+
+    path_norm = str(path).replace("\\", "/").rstrip("/")
+    workspace_norm = str(workspace_path).replace("\\", "/").rstrip("/")
+
+    # Windows 드라이브 문자는 대소문자를 무시해 비교한다.
+    if _is_windows_absolute_path(path_norm) and _is_windows_absolute_path(workspace_norm):
+        path_fold = path_norm.casefold()
+        workspace_fold = workspace_norm.casefold()
+        return path_fold == workspace_fold or path_fold.startswith(workspace_fold + "/")
+
+    return False
 
 
 def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: str) -> None:
@@ -1138,10 +1503,25 @@ def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: st
         config.code_scan = bool(yaml_config.semgrep.enabled)
     if _is_explicit_nested_field(yaml_config, "trivy", "enabled"):
         config.dependency_scan = bool(yaml_config.trivy.enabled)
+    if _is_explicit_nested_field(yaml_config, "sonarqube", "enabled"):
+        config.sonar_scan = bool(yaml_config.sonarqube.enabled)
     if _is_explicit_nested_field(yaml_config, "ai_review", "enabled"):
         config.ai_review = bool(yaml_config.ai_review.enabled)
     if _is_explicit_nested_field(yaml_config, "reporting", "sarif_output"):
-        config.sarif_output = str(yaml_config.reporting.sarif_output)
+        sarif_output = yaml_config.reporting.sarif_output
+        if sarif_output is None or not str(sarif_output).strip():
+            logger.warning(
+                "Ignoring empty reporting.sarif_output from YAML config; keeping %s",
+                config.sarif_output,
+            )
+        else:
+            config.sarif_output = str(sarif_output).strip()
+    if _is_explicit_nested_field(yaml_config, "reporting", "json_output"):
+        json_output = yaml_config.reporting.json_output
+        if json_output is None or not str(json_output).strip():
+            config.json_output = None
+        else:
+            config.json_output = str(json_output).strip()
     if _is_explicit_nested_field(yaml_config, "reporting", "fail_on_findings"):
         config.fail_on_findings = bool(yaml_config.reporting.fail_on_findings)
     if _is_explicit_nested_field(yaml_config, "reporting", "fail_on_severity"):
@@ -1164,6 +1544,15 @@ def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: st
         )
         if gitleaks_baseline_path:
             os.environ["INPUT_GITLEAKS_BASELINE"] = gitleaks_baseline_path
+
+    if _is_explicit_nested_field(yaml_config, "sonarqube", "host_url"):
+        host_url = str(yaml_config.sonarqube.host_url or "").strip()
+        if host_url:
+            os.environ["SONAR_HOST_URL"] = host_url
+    if _is_explicit_nested_field(yaml_config, "sonarqube", "project_key"):
+        project_key = str(yaml_config.sonarqube.project_key or "").strip()
+        if project_key:
+            os.environ["SONAR_PROJECT_KEY"] = project_key
 
     if _is_explicit_nested_field(yaml_config, "ai_review", "enabled"):
         os.environ["INPUT_AI_REVIEW"] = str(config.ai_review).lower()
@@ -1188,7 +1577,15 @@ def apply_global_excludes(
 
     for finding in findings:
         file_path = str(finding.get("file_path", "")).replace("\\", "/")
-        matched_pattern = next((p for p in exclude_patterns if fnmatch(file_path, p)), None)
+        candidates = [file_path, f"/{file_path}"]
+        matched_pattern = next(
+            (
+                pattern
+                for pattern in exclude_patterns
+                if any(fnmatch(path, pattern) for path in candidates)
+            ),
+            None,
+        )
         if matched_pattern:
             suppressed_finding = dict(finding)
             suppressed_finding["suppress_reason"] = (
@@ -1250,11 +1647,15 @@ def emit_usage_tracking(
 
 def main() -> int:
     """메인 함수"""
+    _configure_runtime_verbosity()
     print_banner()
 
     # 설정 로드
     config = Config.from_env()
-    workspace = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+    workspace = _get_workspace()
+    # 로컬 실행(`python src/main.py`)에서도 경로 정규화 기준이 일관되도록
+    # 런타임 workspace를 환경 변수에 보장한다.
+    os.environ["GITHUB_WORKSPACE"] = workspace
     yaml_config, yaml_config_path = load_yaml_runtime_config(config, workspace)
     if yaml_config:
         apply_yaml_runtime_overrides(config, yaml_config, workspace)
@@ -1285,6 +1686,7 @@ def main() -> int:
     console.print(f"  AI Review: {config.ai_review}")
     console.print(f"  Severity Threshold: {config.severity_threshold.value}")
     console.print(f"  SARIF Upload: {config.upload_sarif} (category: {config.sarif_category})")
+    console.print(f"  JSON Output: {config.json_output or '(disabled)'}")
     console.print(f"  Fail on SARIF upload error: {config.fail_on_sarif_upload_error}")
     console.print(f"  Usage Tracking: {config.usage_tracking} (local-only)")
     console.print(f"  Parallel Execution: {config.parallel}")
@@ -1322,11 +1724,6 @@ def main() -> int:
     # 스캐너 실행 (각 스캐너별 Check Run 생성)
     results = run_scanners(config, github_reporter)
     scanner_runtime_errors = collect_scanner_runtime_errors(results)
-
-    # AI 리뷰 실행 (AI Review Check Run 생성)
-    ai_review_result = None
-    if config.ai_review:
-        ai_review_result = run_ai_review(results, config, github_reporter)
 
     # 결과 요약 출력
     print_scan_summary(results, config)
@@ -1407,6 +1804,18 @@ def main() -> int:
         logger.warning(f"False positive filtering unavailable: {e}")
     except Exception as e:
         logger.error(f"False positive filtering failed: {e}")
+
+    set_findings_count_outputs(all_findings)
+
+    # AI 리뷰 실행 (필터링된 finding 기준)
+    ai_review_result = None
+    if config.ai_review:
+        ai_review_result = run_ai_review(
+            results,
+            config,
+            github_reporter,
+            prefiltered_findings=all_findings,
+        )
 
     # GitHub Actions 워크플로우 annotation 출력 (UI에 직접 표시)
     print_workflow_annotations(all_findings)
@@ -1493,7 +1902,9 @@ def main() -> int:
                 )
 
             # Required Check 완료
-            console.print(f"  Creating Required Check with {len(all_findings)} findings...")
+            console.print(
+                f"  Creating Required Check with {len(required_check_findings)} finding(s)..."
+            )
             github_reporter.complete_required_check(
                 all_findings=required_check_findings,
                 scan_results=scan_summary,
@@ -1527,6 +1938,19 @@ def main() -> int:
             f"Found vulnerabilities at or above {config.severity_threshold.value} severity[/bold red]"
         )
         return 1
+
+    if scanner_runtime_errors:
+        if config.fail_on_findings:
+            console.print(
+                "\n[bold red]❌ Security scan failed due to scanner runtime errors "
+                "(fail-on-findings=true)[/bold red]"
+            )
+            return 1
+
+        console.print(
+            "\n[bold yellow]⚠ Security scan completed with scanner runtime errors[/bold yellow]"
+        )
+        return 0
 
     console.print("\n[bold green]✅ Security scan completed successfully[/bold green]")
     return 0

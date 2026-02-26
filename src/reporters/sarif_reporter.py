@@ -5,6 +5,7 @@ https://docs.github.com/en/code-security/code-scanning/integrating-with-code-sca
 """
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -213,6 +214,7 @@ class SarifReport:
 class SarifReporter:
     """SARIF 리포터"""
 
+    UNKNOWN_LOCATION_URI = "unknown-location"
     SEVERITY_TO_LEVEL = {
         "critical": "error",
         "high": "error",
@@ -224,6 +226,84 @@ class SarifReporter:
     def __init__(self):
         self.rules: dict[str, SarifReportingDescriptor] = {}
         self.results: list[SarifResult] = []
+
+    @staticmethod
+    def _is_windows_absolute_path(path: str) -> bool:
+        """Windows 절대경로 여부 확인 (예: C:/repo/file.py)."""
+        normalized = path.replace("\\", "/")
+        return len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/"
+
+    @classmethod
+    def _strip_workspace_prefix(cls, path: str, workspace: str) -> str:
+        """워크스페이스 prefix를 제거해 상대 경로로 변환."""
+        if not workspace:
+            return path
+
+        if path == workspace:
+            return ""
+        if path.startswith(workspace + "/"):
+            return path[len(workspace) + 1 :]
+
+        # Windows 드라이브 문자는 대소문자를 무시해 비교한다.
+        if cls._is_windows_absolute_path(path) and cls._is_windows_absolute_path(workspace):
+            path_fold = path.casefold()
+            workspace_fold = workspace.casefold()
+            if path_fold == workspace_fold:
+                return ""
+            if path_fold.startswith(workspace_fold + "/"):
+                return path[len(workspace) + 1 :]
+
+        return path
+
+    @classmethod
+    def _normalize_artifact_uri(cls, raw_path: str | None) -> str:
+        """SARIF artifactLocation.uri 정규화."""
+        path = str(raw_path or "").strip().replace("\\", "/")
+        if not path:
+            return cls.UNKNOWN_LOCATION_URI
+
+        if path.startswith("file://"):
+            path = path[7:]
+
+        workspace = os.getenv("GITHUB_WORKSPACE", "").strip().replace("\\", "/").rstrip("/")
+        path = cls._strip_workspace_prefix(path, workspace)
+
+        while path.startswith("./"):
+            path = path[2:]
+        path = path.lstrip("/")
+
+        if path.startswith("/") or cls._is_windows_absolute_path(path):
+            return cls.UNKNOWN_LOCATION_URI
+
+        parts = [segment for segment in path.split("/") if segment not in ("", ".")]
+        if not parts or any(segment == ".." for segment in parts):
+            return cls.UNKNOWN_LOCATION_URI
+
+        return "/".join(parts)
+
+    @staticmethod
+    def _normalize_region(
+        line_start: int | str | None,
+        line_end: int | str | None = None,
+    ) -> tuple[int, int | None]:
+        """SARIF region 라인 범위를 양의 정수로 정규화."""
+        try:
+            start = max(1, int(line_start))
+        except (TypeError, ValueError):
+            start = 1
+
+        if line_end is None:
+            return start, None
+
+        try:
+            end_candidate = int(line_end)
+        except (TypeError, ValueError):
+            return start, None
+
+        if end_candidate < start:
+            return start, start
+
+        return start, end_candidate
 
     def add_finding(
         self,
@@ -238,6 +318,9 @@ class SarifReporter:
         metadata: dict | None = None,
     ) -> None:
         """취약점 결과 추가"""
+        normalized_path = self._normalize_artifact_uri(file_path)
+        normalized_start_line, normalized_end_line = self._normalize_region(line_start, line_end)
+
         # 규칙 등록
         full_rule_id = f"{scanner}/{rule_id}"
         if full_rule_id not in self.rules:
@@ -254,13 +337,21 @@ class SarifReporter:
         # 위치 생성
         location = SarifLocation(
             physicalLocation=SarifPhysicalLocation(
-                artifactLocation=SarifArtifactLocation(uri=file_path),
+                artifactLocation=SarifArtifactLocation(uri=normalized_path),
                 region=SarifRegion(
-                    startLine=max(1, line_start),
-                    endLine=line_end,
+                    startLine=normalized_start_line,
+                    endLine=normalized_end_line,
                 ),
             )
         )
+
+        properties = {
+            "scanner": scanner,
+            "severity": severity,
+            **(metadata or {}),
+        }
+        if suggestion:
+            properties["recommendation"] = suggestion
 
         # 결과 생성
         result = SarifResult(
@@ -269,13 +360,9 @@ class SarifReporter:
             message=SarifMessage(text=message),
             locations=[location],
             fingerprints={
-                "primaryLocationLineHash": f"{file_path}:{line_start}:{rule_id}",
+                "primaryLocationLineHash": f"{normalized_path}:{normalized_start_line}:{rule_id}",
             },
-            properties={
-                "scanner": scanner,
-                "severity": severity,
-                **(metadata or {}),
-            },
+            properties=properties,
         )
 
         self.results.append(result)
@@ -296,7 +383,7 @@ class SarifReporter:
         driver = SarifDriver(
             name="Security Scanner Action",
             version="0.1.0",
-            informationUri="https://github.com/your-org/security-action",
+            informationUri=self._build_information_uri(),
             rules=list(self.rules.values()),
         )
 
@@ -313,10 +400,18 @@ class SarifReporter:
 
         return SarifReport(runs=[run])
 
+    def _build_information_uri(self) -> str:
+        """SARIF tool 정보 URI 생성"""
+        server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+        repo = os.getenv("GITHUB_ACTION_REPOSITORY") or os.getenv("GITHUB_REPOSITORY")
+        if repo:
+            return f"{server_url}/{repo}"
+        return "https://github.com/jhl-labs/security-action"
+
     def save(self, output_path: str) -> None:
         """SARIF 파일 저장"""
         report = self.generate_report()
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report.to_dict(), f, indent=2)
 
     def to_json(self) -> str:

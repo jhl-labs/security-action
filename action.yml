@@ -24,6 +24,12 @@ inputs:
     description: '의존성 취약점 스캔 활성화 (Trivy)'
     required: false
     default: 'true'
+  gitleaks-config:
+    description: 'Gitleaks 커스텀 설정 파일 경로'
+    required: false
+  gitleaks-baseline:
+    description: 'Gitleaks baseline 파일 경로 (기존 발견 무시)'
+    required: false
 
   # 추가 스캐너
   container-scan:
@@ -33,12 +39,21 @@ inputs:
   container-image:
     description: '스캔할 컨테이너 이미지 (예: nginx:latest)'
     required: false
+  dockerfile-path:
+    description: '컨테이너 이미지 대신 스캔할 Dockerfile 경로'
+    required: false
   iac-scan:
     description: 'IaC 보안 스캔 활성화 (Checkov)'
     required: false
     default: 'false'
   iac-frameworks:
     description: 'IaC 프레임워크 (terraform,kubernetes,dockerfile 등)'
+    required: false
+  iac-skip-checks:
+    description: '건너뛸 Checkov 체크 ID 목록 (콤마 구분)'
+    required: false
+  iac-custom-checks:
+    description: '커스텀 Checkov 체크 디렉토리 경로'
     required: false
 
   # 네이티브 의존성 스캔
@@ -64,6 +79,9 @@ inputs:
     description: 'SBOM 출력 파일 경로'
     required: false
     default: 'sbom.json'
+  sbom-image:
+    description: '소스 대신 SBOM을 생성할 컨테이너 이미지 (예: nginx:latest)'
+    required: false
 
   # SonarQube
   sonar-scan:
@@ -71,7 +89,7 @@ inputs:
     required: false
     default: 'false'
   sonar-host-url:
-    description: 'SonarQube 서버 URL'
+    description: 'SonarQube 서버 URL (토큰 사용 시 원격 HTTP는 보안상 차단)'
     required: false
     default: 'http://localhost:9000'
   sonar-token:
@@ -139,6 +157,9 @@ inputs:
     description: 'SARIF 포맷 결과 파일 경로'
     required: false
     default: 'security-results.sarif'
+  json-output:
+    description: 'JSON 결과 파일 경로 (선택)'
+    required: false
   upload-sarif:
     description: 'GitHub Security 탭에 SARIF 직접 업로드 (내장 API 연동)'
     required: false
@@ -159,6 +180,14 @@ inputs:
     description: '스캐너 병렬 실행 여부 (기본: false)'
     required: false
     default: 'false'
+  verbose:
+    description: '상세 로그 출력 활성화'
+    required: false
+    default: 'false'
+  quiet:
+    description: '최소 로그 출력 활성화 (verbose보다 우선)'
+    required: false
+    default: 'false'
 
 outputs:
   scan-results:
@@ -171,6 +200,8 @@ outputs:
     description: 'High 심각도 취약점 개수'
   sarif-file:
     description: 'SARIF 결과 파일 경로'
+  json-file:
+    description: 'JSON 결과 파일 경로'
   sarif-upload-id:
     description: 'GitHub Code Scanning SARIF 업로드 ID'
   sbom-file:
@@ -185,11 +216,16 @@ runs:
     INPUT_SECRET_SCAN_HISTORY: ${{ inputs.secret-scan-history }}
     INPUT_CODE_SCAN: ${{ inputs.code-scan }}
     INPUT_DEPENDENCY_SCAN: ${{ inputs.dependency-scan }}
+    INPUT_GITLEAKS_CONFIG: ${{ inputs.gitleaks-config }}
+    INPUT_GITLEAKS_BASELINE: ${{ inputs.gitleaks-baseline }}
     # 추가 스캐너
     INPUT_CONTAINER_SCAN: ${{ inputs.container-scan }}
     INPUT_CONTAINER_IMAGE: ${{ inputs.container-image }}
+    INPUT_DOCKERFILE_PATH: ${{ inputs.dockerfile-path }}
     INPUT_IAC_SCAN: ${{ inputs.iac-scan }}
     INPUT_IAC_FRAMEWORKS: ${{ inputs.iac-frameworks }}
+    INPUT_IAC_SKIP_CHECKS: ${{ inputs.iac-skip-checks }}
+    INPUT_IAC_CUSTOM_CHECKS: ${{ inputs.iac-custom-checks }}
     # 네이티브 의존성 스캔
     INPUT_NATIVE_AUDIT: ${{ inputs.native-audit }}
     INPUT_NATIVE_AUDIT_TOOLS: ${{ inputs.native-audit-tools }}
@@ -197,6 +233,7 @@ runs:
     INPUT_SBOM_GENERATE: ${{ inputs.sbom-generate }}
     INPUT_SBOM_FORMAT: ${{ inputs.sbom-format }}
     INPUT_SBOM_OUTPUT: ${{ inputs.sbom-output }}
+    INPUT_SBOM_IMAGE: ${{ inputs.sbom-image }}
     # SonarQube
     INPUT_SONAR_SCAN: ${{ inputs.sonar-scan }}
     SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
@@ -220,8 +257,11 @@ runs:
     INPUT_CONFIG_PATH: ${{ inputs.config-path }}
     INPUT_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
     INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+    INPUT_JSON_OUTPUT: ${{ inputs.json-output }}
     INPUT_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
     INPUT_SARIF_CATEGORY: ${{ inputs.sarif-category }}
     INPUT_FAIL_ON_SARIF_UPLOAD_ERROR: ${{ inputs.fail-on-sarif-upload-error }}
     INPUT_USAGE_TRACKING: ${{ inputs.usage-tracking }}
     INPUT_PARALLEL: ${{ inputs.parallel }}
+    INPUT_VERBOSE: ${{ inputs.verbose }}
+    INPUT_QUIET: ${{ inputs.quiet }}

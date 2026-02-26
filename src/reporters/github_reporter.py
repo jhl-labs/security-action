@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from gzip import compress
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 import httpx
 from github import Github
@@ -160,6 +161,8 @@ class GitHubReporter:
 
     # GitHub API 제한: 한 번에 최대 50개 어노테이션
     MAX_ANNOTATIONS_PER_REQUEST = 50
+    MAX_ANNOTATION_TITLE_LENGTH = 255
+    MAX_ANNOTATION_MESSAGE_LENGTH = 8000
     MAX_API_RETRIES = 3
     BASE_RETRY_DELAY_SECONDS = 1.0
     RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
@@ -189,10 +192,67 @@ class GitHubReporter:
         self.pr: PullRequest | None = None
         self._active_check_runs: dict[str, CheckRunContext] = {}
         self._required_check: CheckRun | None = None
+        self._unsupported_api_url_scheme = not self._is_supported_api_scheme(self.api_url)
+        self._api_url_has_credentials = self._has_url_credentials(self.api_url)
+        self._insecure_api_url = self._is_remote_insecure_http(self.api_url)
 
-        if self.token:
+        if self.token and self._unsupported_api_url_scheme:
+            logger.error(
+                "Refusing to initialize GitHub API client with unsupported GITHUB_API_URL "
+                "scheme (http/https only): %s",
+                self._sanitize_url_for_log(self.api_url),
+            )
+        elif self.token and self._api_url_has_credentials:
+            logger.error(
+                "Refusing to initialize GitHub API client with embedded credentials in "
+                "GITHUB_API_URL. Use token input instead: %s",
+                self._sanitize_url_for_log(self.api_url),
+            )
+        elif self.token and self._insecure_api_url:
+            logger.error(
+                "Refusing to initialize GitHub API client with token over insecure HTTP "
+                "GITHUB_API_URL: %s",
+                self._sanitize_url_for_log(self.api_url),
+            )
+        elif self.token:
             self.github = Github(login_or_token=self.token, base_url=self.api_url)
             self._init_context()
+
+    @staticmethod
+    def _is_supported_api_scheme(url: str) -> bool:
+        """지원하는 GitHub API URL scheme 여부 확인."""
+        scheme = (urlparse(url).scheme or "").lower()
+        return scheme in {"http", "https"}
+
+    @staticmethod
+    def _has_url_credentials(url: str) -> bool:
+        """URL에 userinfo(username/password)가 포함됐는지 확인."""
+        parsed = urlparse(url)
+        return bool(parsed.username or parsed.password)
+
+    @staticmethod
+    def _sanitize_url_for_log(url: str) -> str:
+        """로그 출력용 URL(credential/query/fragment 제거)."""
+        try:
+            parsed = urlparse(url)
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            return parsed._replace(netloc=netloc, query="", fragment="").geturl()
+        except Exception:
+            return url
+
+    @staticmethod
+    def _is_remote_insecure_http(url: str) -> bool:
+        """원격 HTTP URL 여부 확인 (localhost 제외)."""
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        if scheme != "http":
+            return False
+
+        local_hosts = {"localhost", "127.0.0.1", "::1"}
+        return host not in local_hosts
 
     def _init_context(self) -> None:
         """GitHub Actions 컨텍스트 초기화"""
@@ -207,8 +267,8 @@ class GitHubReporter:
             pr_number = self._get_pr_number()
             if pr_number:
                 self.pr = self.repo.get_pull(pr_number)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to initialize GitHub context for %s: %s", repo_name, e)
 
     def _get_pr_number(self) -> int | None:
         """PR 번호 가져오기"""
@@ -226,12 +286,12 @@ class GitHubReporter:
             try:
                 import json
 
-                with open(event_path) as f:
+                with open(event_path, encoding="utf-8") as f:
                     event = json.load(f)
                     if "pull_request" in event:
                         return event["pull_request"]["number"]
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to parse GITHUB_EVENT_PATH (%s): %s", event_path, e)
 
         return None
 
@@ -359,8 +419,8 @@ class GitHubReporter:
             )
             logger.info(f"Started required check: {self.check_name}")
             return True
-        except GithubException as e:
-            logger.error(f"Failed to start required check: {e}")
+        except Exception as e:
+            logger.error(f"Failed to start required check: {type(e).__name__}: {e}")
             return False
 
     def complete_required_check(
@@ -439,8 +499,8 @@ class GitHubReporter:
 
             logger.info(f"Completed required check: {self.check_name} - {conclusion.value}")
             return True
-        except GithubException as e:
-            logger.error(f"Failed to complete required check: {e}")
+        except Exception as e:
+            logger.error(f"Failed to complete required check: {type(e).__name__}: {e}")
             return False
 
     def _determine_conclusion_with_threshold(
@@ -606,8 +666,8 @@ class GitHubReporter:
             self._with_retry("create commit status", lambda: commit.create_status(**kwargs))
             logger.debug(f"Created commit status: {context} = {state.value}")
             return True
-        except GithubException as e:
-            logger.error(f"Failed to create commit status: {e}")
+        except Exception as e:
+            logger.error(f"Failed to create commit status: {type(e).__name__}: {e}")
             return False
 
     def create_scanner_status(
@@ -706,44 +766,64 @@ class GitHubReporter:
 
         try:
             # 변경된 파일 목록 가져오기
-            changed_files = {f.filename for f in self.pr.get_files()}
+            changed_files = set()
+            for changed_file in self.pr.get_files():
+                normalized = self._normalize_annotation_path(changed_file.filename)
+                if normalized:
+                    changed_files.add(normalized)
+            review_body = summary
+            if review_body is None and findings:
+                review_body = self._generate_review_summary(findings)
 
             # 코멘트 생성
             comments = []
             for finding in findings:
-                # 변경된 파일만 코멘트 가능
-                if finding.file_path not in changed_files:
+                normalized_path = self._normalize_annotation_path(finding.file_path)
+                if not normalized_path:
                     continue
+                # 변경된 파일만 코멘트 가능
+                if normalized_path not in changed_files:
+                    continue
+
+                try:
+                    line = max(1, int(finding.line))
+                except (TypeError, ValueError):
+                    line = 1
 
                 body = self._format_inline_comment(finding)
                 comments.append(
                     {
-                        "path": finding.file_path,
-                        "line": finding.line,
+                        "path": normalized_path,
+                        "line": line,
                         "body": body,
                     }
                 )
 
             # 리뷰 생성
             if comments:
-                review_body = summary or self._generate_review_summary(findings)
-                self._with_retry(
-                    "create pr review",
-                    lambda: self.pr.create_review(
-                        body=review_body,
-                        event="COMMENT",
-                        comments=comments[:50],  # GitHub API 제한
-                    ),
-                )
-                return True
+                try:
+                    self._with_retry(
+                        "create pr review",
+                        lambda: self.pr.create_review(
+                            body=review_body or "Security scan findings",
+                            event="COMMENT",
+                            comments=comments[:50],  # GitHub API 제한
+                        ),
+                    )
+                    return True
+                except Exception as e:
+                    logger.warning(
+                        "Failed to create PR inline review, falling back to issue comment: %s",
+                        e,
+                    )
 
-            # 코멘트가 없으면 일반 코멘트로 대체
-            if summary:
-                return self.create_pr_comment(summary)
-
+            # 인라인 코멘트를 달 수 없거나 실패한 경우 일반 코멘트로 대체
+            if review_body:
+                return self.create_pr_comment(review_body)
             return False
 
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to create PR review: %s", e)
             return False
 
     def _format_inline_comment(self, finding: FindingComment) -> str:
@@ -775,7 +855,8 @@ class GitHubReporter:
         """리뷰 요약 생성"""
         severity_counts = {}
         for f in findings:
-            severity_counts[f.severity] = severity_counts.get(f.severity, 0) + 1
+            severity = (f.severity or "").lower()
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
 
         lines = [
             "## 🛡️ Security Scan Results",
@@ -879,8 +960,25 @@ class GitHubReporter:
 
     def _get_checkout_uri(self) -> str:
         """SARIF 업로드용 checkout URI 생성"""
-        workspace = os.getenv("GITHUB_WORKSPACE", "/github/workspace")
-        return Path(workspace).resolve().as_uri()
+        workspace = (os.getenv("GITHUB_WORKSPACE") or "/github/workspace").strip()
+        if not workspace:
+            workspace = "/github/workspace"
+
+        normalized = workspace.replace("\\", "/")
+        if self._is_windows_absolute_path(normalized):
+            # file URI for Windows absolute path (e.g. C:/repo -> file:///C:/repo)
+            drive = normalized[0].upper()
+            tail = "/" + normalized[2:].lstrip("/")
+            return f"file:///{drive}:{quote(tail, safe='/')}"
+
+        try:
+            return Path(workspace).expanduser().resolve(strict=False).as_uri()
+        except Exception as e:
+            logger.warning("Failed to build checkout_uri from workspace %r: %s", workspace, e)
+            fallback_path = (
+                normalized if normalized.startswith("/") else f"/{normalized.lstrip('/')}"
+            )
+            return "file://" + quote(fallback_path, safe="/:")
 
     def _prepare_sarif_bytes(self, raw_bytes: bytes, category: str | None = None) -> bytes:
         """SARIF 바이트 전처리.
@@ -928,6 +1026,33 @@ class GitHubReporter:
         if not self.token:
             return SarifUploadResult(success=False, error="GitHub token not available")
 
+        if self._unsupported_api_url_scheme:
+            return SarifUploadResult(
+                success=False,
+                error=(
+                    "Unsupported GITHUB_API_URL scheme for authenticated requests. "
+                    "Use http:// or https://."
+                ),
+            )
+
+        if self._api_url_has_credentials:
+            return SarifUploadResult(
+                success=False,
+                error=(
+                    "Refusing SARIF upload with embedded credentials in GITHUB_API_URL. "
+                    "Use github-token/input token instead."
+                ),
+            )
+
+        if self._insecure_api_url:
+            return SarifUploadResult(
+                success=False,
+                error=(
+                    "Refusing SARIF upload over insecure HTTP GITHUB_API_URL. "
+                    "Use HTTPS (or localhost only)."
+                ),
+            )
+
         sha = self._get_sha()
         ref = self._get_ref()
         if not sha or not ref:
@@ -971,8 +1096,8 @@ class GitHubReporter:
                         res_json = response.json()
                         if isinstance(res_json, dict) and res_json.get("message"):
                             detail = str(res_json["message"])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to decode SARIF upload error body: %s", e)
 
                     if response.status_code == 403:
                         detail += (
@@ -1459,7 +1584,7 @@ class GitHubReporter:
         """
         annotations = []
         for finding in findings:
-            path = (finding.get("file_path") or "").strip()
+            path = self._normalize_annotation_path(finding.get("file_path") or "")
             if not path:
                 continue
 
@@ -1467,7 +1592,9 @@ class GitHubReporter:
             scanner = finding.get("scanner", "unknown")
             rule_id = finding.get("rule_id", "UNKNOWN")
             message = finding.get("message", "Security issue detected")
-            cwe = finding.get("cwe", finding.get("metadata", {}).get("cwe", ""))
+            cwe = self._normalize_cwe_for_annotation(
+                finding.get("cwe", finding.get("metadata", {}).get("cwe", ""))
+            )
             try:
                 start_line = max(1, int(finding.get("line_start") or 1))
             except (TypeError, ValueError):
@@ -1479,7 +1606,12 @@ class GitHubReporter:
                 end_line = start_line
 
             # GHAS 스타일 간결한 포맷: SEVERITY|SCANNER|CWE|MESSAGE
-            structured_message = f"{severity}|{scanner}|{cwe}|{message}"
+            structured_message = self._build_annotation_message(
+                severity=severity,
+                scanner=scanner,
+                cwe=cwe,
+                message=message,
+            )
 
             annotations.append(
                 {
@@ -1487,11 +1619,118 @@ class GitHubReporter:
                     "start_line": start_line,
                     "end_line": end_line,
                     "annotation_level": self._severity_to_annotation_level(severity),
-                    "title": rule_id,
+                    "title": self._truncate_annotation_field(
+                        str(rule_id), self.MAX_ANNOTATION_TITLE_LENGTH
+                    ),
                     "message": structured_message,
                 }
             )
         return annotations
+
+    @staticmethod
+    def _normalize_cwe_for_annotation(cwe: str | list | tuple | set | None) -> str:
+        """annotation 메시지용 CWE 문자열 정규화."""
+        if cwe is None:
+            return ""
+        if isinstance(cwe, (list, tuple, set)):
+            return ",".join(str(item) for item in list(cwe)[:3] if str(item).strip())
+        return str(cwe)
+
+    @staticmethod
+    def _truncate_annotation_field(value: str, limit: int) -> str:
+        """GitHub annotation 필드 길이 제한."""
+        text = str(value).replace("\r", " ").replace("\n", " ").strip()
+        if len(text) <= limit:
+            return text
+        if limit <= 3:
+            return text[:limit]
+        return text[: limit - 3] + "..."
+
+    def _build_annotation_message(
+        self,
+        severity: str,
+        scanner: str,
+        cwe: str,
+        message: str,
+    ) -> str:
+        """구조화 annotation 메시지 생성 + 길이 제한."""
+        safe_severity = self._sanitize_structured_annotation_field(str(severity), 32)
+        safe_scanner = self._sanitize_structured_annotation_field(str(scanner), 128)
+        safe_cwe = self._sanitize_structured_annotation_field(str(cwe), 256)
+
+        prefix = f"{safe_severity}|{safe_scanner}|{safe_cwe}|"
+        remaining = max(0, self.MAX_ANNOTATION_MESSAGE_LENGTH - len(prefix))
+        message_part = self._truncate_annotation_field(str(message), remaining)
+        return prefix + message_part
+
+    def _sanitize_structured_annotation_field(self, value: str, limit: int) -> str:
+        """구조화 필드에서 구분자(`|`) 충돌을 제거한다."""
+        return self._truncate_annotation_field(value.replace("|", "/"), limit)
+
+    @staticmethod
+    def _is_windows_absolute_path(path: str) -> bool:
+        """Windows 절대경로 여부 확인 (예: C:/repo/file.py)."""
+        return len(path) >= 3 and path[1] == ":" and path[2] == "/"
+
+    @classmethod
+    def _strip_workspace_prefix(cls, path: str, workspace: str) -> str:
+        """워크스페이스 prefix를 제거해 상대 경로로 변환."""
+        if not workspace:
+            return path
+
+        if path == workspace:
+            return ""
+        if path.startswith(workspace + "/"):
+            return path[len(workspace) + 1 :]
+
+        # Windows는 드라이브 문자 대소문자를 무시해 비교한다.
+        if cls._is_windows_absolute_path(path) and cls._is_windows_absolute_path(workspace):
+            path_fold = path.casefold()
+            workspace_fold = workspace.casefold()
+            if path_fold == workspace_fold:
+                return ""
+            if path_fold.startswith(workspace_fold + "/"):
+                return path[len(workspace) + 1 :]
+
+        return path
+
+    def _normalize_annotation_path(self, raw_path: str) -> str | None:
+        """GitHub annotation용 경로를 정규화한다.
+
+        - workspace 절대경로는 상대경로로 변환
+        - `.`/빈 세그먼트 제거
+        - `..` 세그먼트가 포함된 경로는 거부
+        - Windows 절대경로(`C:/...`)는 상대화할 수 없으면 거부
+        """
+        path = str(raw_path or "").strip().replace("\\", "/")
+        if not path:
+            return None
+
+        if path.startswith("file://"):
+            path = path[7:]
+
+        workspace = os.getenv("GITHUB_WORKSPACE", "").strip().replace("\\", "/").rstrip("/")
+        path = self._strip_workspace_prefix(path, workspace)
+
+        if path.startswith("/"):
+            # workspace 외부 절대경로는 annotation 대상에서 제외
+            return None
+
+        while path.startswith("./"):
+            path = path[2:]
+        path = path.lstrip("/")
+
+        # Windows absolute path (e.g. C:/repo/file.py)
+        if self._is_windows_absolute_path(path):
+            return None
+
+        parts = [segment for segment in path.split("/") if segment not in ("", ".")]
+        if not parts:
+            return None
+        if any(segment == ".." for segment in parts):
+            return None
+
+        return "/".join(parts)
 
     def _add_remaining_annotations(
         self,
@@ -1506,18 +1745,22 @@ class GitHubReporter:
         for i in range(0, len(annotations), self.MAX_ANNOTATIONS_PER_REQUEST):
             batch = annotations[i : i + self.MAX_ANNOTATIONS_PER_REQUEST]
             try:
+                title = ""
+                if getattr(check_run, "output", None) is not None:
+                    title = getattr(check_run.output, "title", "") or ""
+
                 self._with_retry(
                     "append remaining annotations",
                     lambda: check_run.edit(
                         output={
-                            "title": check_run.output.title if check_run.output else "",
+                            "title": title,
                             "summary": summary,
                             "annotations": batch,
                         }
                     ),
                 )
-            except Exception:
-                pass  # 실패해도 계속 진행
+            except Exception as e:
+                logger.warning("Failed to append additional annotations: %s", e)
 
     # =========================================================================
     # 통합 Check Run (전체 보안 스캔 요약)
@@ -1947,9 +2190,9 @@ class GitHubReporter:
         summary_file = os.getenv("GITHUB_STEP_SUMMARY")
         if summary_file:
             try:
-                with open(summary_file, "a") as f:
+                with open(summary_file, "a", encoding="utf-8") as f:
                     f.write(summary)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to write GitHub step summary (%s): %s", summary_file, e)
 
         return summary

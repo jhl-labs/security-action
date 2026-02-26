@@ -7,6 +7,7 @@ import json as json_lib
 
 import pytest
 
+import reporters as reporters_pkg
 import reporters.github_reporter as gh_reporter_module
 from reporters.github_reporter import FindingComment, GitHubReporter
 from reporters.sarif_reporter import SarifReporter
@@ -114,6 +115,85 @@ class TestSarifReporter:
         data = json.loads(json_str)
         assert data["version"] == "2.1.0"
 
+    def test_add_finding_includes_recommendation_property(self):
+        reporter = SarifReporter()
+        reporter.add_finding(
+            scanner="Semgrep",
+            rule_id="sql-injection",
+            severity="high",
+            message="Potential SQL injection",
+            file_path="app.py",
+            line_start=12,
+            suggestion="Use parameterized queries.",
+        )
+
+        report = reporter.generate_report().to_dict()
+        result = report["runs"][0]["results"][0]
+        assert result["properties"]["recommendation"] == "Use parameterized queries."
+
+    def test_generate_report_uses_github_repository_uri(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_SERVER_URL", "https://ghe.example.com")
+        monkeypatch.setenv("GITHUB_ACTION_REPOSITORY", "acme/security-action")
+
+        reporter = SarifReporter()
+        report = reporter.generate_report().to_dict()
+
+        assert (
+            report["runs"][0]["tool"]["driver"]["informationUri"]
+            == "https://ghe.example.com/acme/security-action"
+        )
+
+    def test_add_finding_normalizes_workspace_absolute_artifact_uri(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+        reporter = SarifReporter()
+        reporter.add_finding(
+            scanner="Semgrep",
+            rule_id="sg-test",
+            severity="high",
+            message="test",
+            file_path="/home/runner/work/repo/repo/src/app.py",
+            line_start=5,
+        )
+
+        report = reporter.generate_report().to_dict()
+        result = report["runs"][0]["results"][0]
+        assert result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "src/app.py"
+
+    def test_add_finding_rejects_path_traversal_artifact_uri(self):
+        reporter = SarifReporter()
+        reporter.add_finding(
+            scanner="Semgrep",
+            rule_id="sg-test",
+            severity="high",
+            message="test",
+            file_path="../../etc/passwd",
+            line_start=5,
+        )
+
+        report = reporter.generate_report().to_dict()
+        result = report["runs"][0]["results"][0]
+        assert (
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            == "unknown-location"
+        )
+
+    def test_add_finding_normalizes_invalid_line_range(self):
+        reporter = SarifReporter()
+        reporter.add_finding(
+            scanner="Semgrep",
+            rule_id="sg-test",
+            severity="high",
+            message="test",
+            file_path="src/app.py",
+            line_start="NaN",
+            line_end=0,
+        )
+
+        report = reporter.generate_report().to_dict()
+        region = report["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]
+        assert region["startLine"] == 1
+        assert region["endLine"] == 1
+
 
 class TestGitHubReporter:
     """GitHub 리포터 테스트"""
@@ -174,6 +254,122 @@ class TestGitHubReporter:
         assert "CRITICAL" in summary
         assert "HIGH" in summary
 
+    def test_generate_review_summary_is_case_insensitive(self):
+        reporter = GitHubReporter()
+        findings = [
+            FindingComment("a.py", 1, "HIGH", "T1", "M1"),
+            FindingComment("b.py", 2, "high", "T2", "M2"),
+        ]
+
+        summary = reporter._generate_review_summary(findings)
+        assert "**HIGH**: 2" in summary
+
+    def test_create_pr_review_falls_back_to_comment_when_no_inline_targets(self, monkeypatch):
+        class _FakeFile:
+            def __init__(self, filename: str):
+                self.filename = filename
+
+        class _FakePR:
+            def __init__(self):
+                self.issue_comments: list[str] = []
+
+            def get_files(self):
+                return [_FakeFile("changed.py")]
+
+            def create_review(self, body, event, comments):  # noqa: ARG002
+                raise AssertionError("create_review should not be called")
+
+            def create_issue_comment(self, body):
+                self.issue_comments.append(body)
+                return object()
+
+        reporter = GitHubReporter()
+        fake_pr = _FakePR()
+        reporter.pr = fake_pr
+        monkeypatch.setattr(reporter, "_with_retry", lambda _op, fn: fn())
+
+        ok = reporter.create_pr_review(
+            [FindingComment("not-changed.py", 10, "high", "Rule", "Message")]
+        )
+
+        assert ok is True
+        assert len(fake_pr.issue_comments) == 1
+        assert "Found **1** security issue(s)" in fake_pr.issue_comments[0]
+
+    def test_create_pr_review_falls_back_when_inline_review_api_fails(self, monkeypatch):
+        class _FakeFile:
+            def __init__(self, filename: str):
+                self.filename = filename
+
+        class _FakePR:
+            def __init__(self):
+                self.issue_comments: list[str] = []
+                self.received_comments: list[dict] | None = None
+
+            def get_files(self):
+                return [_FakeFile("changed.py")]
+
+            def create_review(self, body, event, comments):  # noqa: ARG002
+                self.received_comments = comments
+                raise RuntimeError("line not in diff")
+
+            def create_issue_comment(self, body):
+                self.issue_comments.append(body)
+                return object()
+
+        reporter = GitHubReporter()
+        fake_pr = _FakePR()
+        reporter.pr = fake_pr
+        monkeypatch.setattr(reporter, "_with_retry", lambda _op, fn: fn())
+
+        ok = reporter.create_pr_review([FindingComment("changed.py", 0, "high", "Rule", "Message")])
+
+        assert ok is True
+        assert fake_pr.received_comments is not None
+        assert fake_pr.received_comments[0]["line"] == 1
+        assert len(fake_pr.issue_comments) == 1
+
+    def test_create_pr_review_normalizes_workspace_absolute_finding_path(self, monkeypatch):
+        class _FakeFile:
+            def __init__(self, filename: str):
+                self.filename = filename
+
+        class _FakePR:
+            def __init__(self):
+                self.review_comments = None
+
+            def get_files(self):
+                return [_FakeFile("src/app.py")]
+
+            def create_review(self, body, event, comments):  # noqa: ARG002
+                self.review_comments = comments
+                return object()
+
+            def create_issue_comment(self, body):  # pragma: no cover - should not be called
+                raise AssertionError(f"unexpected fallback comment: {body}")
+
+        reporter = GitHubReporter()
+        fake_pr = _FakePR()
+        reporter.pr = fake_pr
+        monkeypatch.setattr(reporter, "_with_retry", lambda _op, fn: fn())
+        monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+
+        ok = reporter.create_pr_review(
+            [
+                FindingComment(
+                    "/home/runner/work/repo/repo/src/app.py",
+                    12,
+                    "high",
+                    "Rule",
+                    "Message",
+                )
+            ]
+        )
+
+        assert ok is True
+        assert fake_pr.review_comments is not None
+        assert fake_pr.review_comments[0]["path"] == "src/app.py"
+
     def test_severity_to_annotation_level(self):
         reporter = GitHubReporter()
         assert reporter._severity_to_annotation_level("critical") == "failure"
@@ -230,6 +426,129 @@ class TestGitHubReporter:
         assert annotations[0]["start_line"] == 1
         assert annotations[0]["end_line"] == 1
 
+    def test_create_annotations_normalizes_workspace_absolute_path(self, monkeypatch):
+        reporter = GitHubReporter()
+        monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+
+        annotations = reporter._create_annotations(
+            [
+                {
+                    "file_path": "/home/runner/work/repo/repo/src/app.py",
+                    "line_start": 10,
+                    "severity": "high",
+                    "scanner": "Semgrep",
+                    "rule_id": "SG-TEST",
+                    "message": "test",
+                }
+            ]
+        )
+
+        assert len(annotations) == 1
+        assert annotations[0]["path"] == "src/app.py"
+
+    def test_create_annotations_normalizes_windows_workspace_path_case_insensitive(
+        self, monkeypatch
+    ):
+        reporter = GitHubReporter()
+        monkeypatch.setenv("GITHUB_WORKSPACE", "C:/Repo/Project")
+
+        annotations = reporter._create_annotations(
+            [
+                {
+                    "file_path": "c:/repo/project/src/app.py",
+                    "line_start": 10,
+                    "severity": "high",
+                    "scanner": "Semgrep",
+                    "rule_id": "SG-TEST",
+                    "message": "test",
+                }
+            ]
+        )
+
+        assert len(annotations) == 1
+        assert annotations[0]["path"] == "src/app.py"
+
+    def test_create_annotations_skips_parent_traversal_path(self):
+        reporter = GitHubReporter()
+
+        annotations = reporter._create_annotations(
+            [
+                {
+                    "file_path": "../../etc/passwd",
+                    "line_start": 1,
+                    "severity": "high",
+                    "scanner": "Semgrep",
+                    "rule_id": "SG-TEST",
+                    "message": "test",
+                }
+            ]
+        )
+
+        assert annotations == []
+
+    def test_create_annotations_skips_external_absolute_path(self):
+        reporter = GitHubReporter()
+
+        annotations = reporter._create_annotations(
+            [
+                {
+                    "file_path": "/etc/passwd",
+                    "line_start": 1,
+                    "severity": "high",
+                    "scanner": "Semgrep",
+                    "rule_id": "SG-TEST",
+                    "message": "test",
+                }
+            ]
+        )
+
+        assert annotations == []
+
+    def test_create_annotations_truncates_long_fields(self):
+        reporter = GitHubReporter()
+        long_rule = "R" * 400
+        long_message = "M" * 20000
+        long_cwe = [f"CWE-{i}" for i in range(10)]
+
+        annotations = reporter._create_annotations(
+            [
+                {
+                    "file_path": "src/app.py",
+                    "line_start": 1,
+                    "severity": "high",
+                    "scanner": "Semgrep",
+                    "rule_id": long_rule,
+                    "message": long_message,
+                    "metadata": {"cwe": long_cwe},
+                }
+            ]
+        )
+
+        assert len(annotations) == 1
+        assert len(annotations[0]["title"]) <= reporter.MAX_ANNOTATION_TITLE_LENGTH
+        assert len(annotations[0]["message"]) <= reporter.MAX_ANNOTATION_MESSAGE_LENGTH
+        assert annotations[0]["message"].startswith("high|Semgrep|CWE-0,CWE-1,CWE-2|")
+
+    def test_create_annotations_sanitizes_pipe_in_structured_fields(self):
+        reporter = GitHubReporter()
+
+        annotations = reporter._create_annotations(
+            [
+                {
+                    "file_path": "src/app.py",
+                    "line_start": 1,
+                    "severity": "high|critical",
+                    "scanner": "Semgrep|Custom",
+                    "rule_id": "SG-TEST",
+                    "message": "test-message",
+                    "metadata": {"cwe": "CWE-79|CWE-89"},
+                }
+            ]
+        )
+
+        assert len(annotations) == 1
+        assert annotations[0]["message"].startswith("high/critical|Semgrep/Custom|CWE-79/CWE-89|")
+
     def test_post_summary(self, tmp_path, monkeypatch):
         # GITHUB_STEP_SUMMARY 시뮬레이션
         summary_file = tmp_path / "summary.md"
@@ -237,7 +556,13 @@ class TestGitHubReporter:
 
         reporter = GitHubReporter()
         findings = [
-            {"rule_id": "test", "severity": "high", "file_path": "a.py", "line_start": 1, "message": "Test"},
+            {
+                "rule_id": "test",
+                "severity": "high",
+                "file_path": "a.py",
+                "line_start": 1,
+                "message": "Test",
+            },
         ]
         scan_results = [
             {"scanner": "Test", "success": True, "findings_count": 1, "time": "1.0s"},
@@ -254,6 +579,21 @@ class TestGitHubReporter:
         reporter = GitHubReporter(token=None)
         assert reporter.api_url == "https://ghe.example.com/api/v3"
 
+    def test_rejects_insecure_http_api_url_when_token_is_set(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_API_URL", "http://ghe.example.com/api/v3")
+        reporter = GitHubReporter(token="dummy-token")
+        assert reporter.github is None
+
+    def test_rejects_api_url_with_embedded_credentials_when_token_is_set(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_API_URL", "https://user:pass@ghe.example.com/api/v3")
+        reporter = GitHubReporter(token="dummy-token")
+        assert reporter.github is None
+
+    def test_rejects_unsupported_api_url_scheme_when_token_is_set(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_API_URL", "ftp://ghe.example.com/api/v3")
+        reporter = GitHubReporter(token="dummy-token")
+        assert reporter.github is None
+
     def test_upload_sarif_without_token(self, tmp_path, monkeypatch):
         sarif_file = tmp_path / "test.sarif"
         sarif_file.write_text('{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"x"}}}]}')
@@ -265,6 +605,46 @@ class TestGitHubReporter:
         result = reporter.upload_sarif(str(sarif_file))
         assert result.success is False
         assert "token" in (result.error or "").lower()
+
+    def test_get_checkout_uri_handles_windows_workspace_path(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_WORKSPACE", "C:/Repo/Project")
+        reporter = GitHubReporter(token=None)
+
+        uri = reporter._get_checkout_uri()
+        assert uri == "file:///C:/Repo/Project"
+
+    def test_get_checkout_uri_handles_relative_workspace(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_WORKSPACE", "relative-workspace")
+        reporter = GitHubReporter(token=None)
+
+        uri = reporter._get_checkout_uri()
+        assert uri.startswith("file://")
+
+    def test_upload_sarif_rejects_insecure_http_api_url(self, tmp_path, monkeypatch):
+        sarif_file = tmp_path / "test.sarif"
+        sarif_file.write_text('{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"x"}}}]}')
+        monkeypatch.setenv("GITHUB_REPOSITORY", "octo/test")
+        monkeypatch.setenv("GITHUB_SHA", "abc123")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        monkeypatch.setenv("GITHUB_API_URL", "http://ghe.example.com/api/v3")
+
+        reporter = GitHubReporter(token="dummy-token")
+        result = reporter.upload_sarif(str(sarif_file))
+        assert result.success is False
+        assert "insecure http" in (result.error or "").lower()
+
+    def test_upload_sarif_rejects_api_url_with_embedded_credentials(self, tmp_path, monkeypatch):
+        sarif_file = tmp_path / "test.sarif"
+        sarif_file.write_text('{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"x"}}}]}')
+        monkeypatch.setenv("GITHUB_REPOSITORY", "octo/test")
+        monkeypatch.setenv("GITHUB_SHA", "abc123")
+        monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+        monkeypatch.setenv("GITHUB_API_URL", "https://user:pass@ghe.example.com/api/v3")
+
+        reporter = GitHubReporter(token="dummy-token")
+        result = reporter.upload_sarif(str(sarif_file))
+        assert result.success is False
+        assert "embedded credentials" in (result.error or "").lower()
 
     def test_upload_sarif_success(self, tmp_path, monkeypatch):
         class FakeResponse:
@@ -407,6 +787,51 @@ class TestGitHubReporter:
         assert response.status_code == 200
         assert client.calls == 3
 
+    def test_start_required_check_handles_non_github_exception(self, monkeypatch):
+        reporter = GitHubReporter(token=None)
+        reporter.repo = object()
+        monkeypatch.setattr(reporter, "_get_sha", lambda: "abc123")
+
+        def raise_runtime(_operation, _fn):  # noqa: ARG001
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(reporter, "_with_retry", raise_runtime)
+        assert reporter.start_required_check() is False
+
+    def test_complete_required_check_handles_non_github_exception(self, monkeypatch):
+        reporter = GitHubReporter(token=None)
+        reporter.repo = object()
+        monkeypatch.setattr(reporter, "_get_sha", lambda: "abc123")
+
+        def raise_runtime(_operation, _fn):  # noqa: ARG001
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(reporter, "_with_retry", raise_runtime)
+        ok = reporter.complete_required_check(
+            all_findings=[],
+            scan_results=[],
+            execution_time=0.0,
+        )
+        assert ok is False
+
+    def test_create_commit_status_handles_non_github_exception(self, monkeypatch):
+        reporter = GitHubReporter(token=None)
+        reporter.repo = object()
+        monkeypatch.setattr(reporter, "_get_sha", lambda: "abc123")
+
+        def raise_runtime(_operation, _fn):  # noqa: ARG001
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(reporter, "_with_retry", raise_runtime)
+        assert (
+            reporter.create_commit_status(
+                state=gh_reporter_module.CommitState.SUCCESS,
+                context="security/test",
+                description="ok",
+            )
+            is False
+        )
+
 
 class TestFindingComment:
     """FindingComment 테스트"""
@@ -423,6 +848,19 @@ class TestFindingComment:
         assert comment.line == 10
         assert comment.suggestion is None
         assert comment.code_fix is None
+
+
+def test_reporters_optional_github_exports_raise_import_error(monkeypatch):
+    monkeypatch.setattr(
+        reporters_pkg,
+        "_GITHUB_IMPORT_ERROR",
+        ImportError("missing github dependency"),
+        raising=False,
+    )
+    monkeypatch.delattr(reporters_pkg, "GitHubReporter", raising=False)
+
+    with pytest.raises(ImportError):
+        getattr(reporters_pkg, "GitHubReporter")
 
 
 if __name__ == "__main__":
