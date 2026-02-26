@@ -3,10 +3,13 @@
 import fnmatch
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,22 +54,29 @@ class FalsePositiveManager:
             return
 
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
                 for item in data.get("findings", []):
                     fp = self._fingerprint(item)
                     self._baseline[fp] = item
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to load false-positive baseline from %s: %s", path, e)
 
     def save_baseline(self, baseline_path: str | Path, findings: list[dict]) -> None:
         """베이스라인 파일 저장"""
+        baseline_findings: list[dict] = []
+        for finding in findings:
+            baseline_item = dict(finding)
+            baseline_item["suppressed"] = bool(baseline_item.get("suppressed", True))
+            baseline_item.setdefault("suppress_reason", "Baseline match")
+            baseline_findings.append(baseline_item)
+
         data = {
             "version": "1.0",
             "generated_at": datetime.now().isoformat(),
-            "findings": findings,
+            "findings": baseline_findings,
         }
-        with open(baseline_path, "w") as f:
+        with open(baseline_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def _fingerprint(self, finding: dict) -> str:
@@ -104,8 +114,9 @@ class FalsePositiveManager:
         fp = self._fingerprint(finding)
         if fp in self._baseline:
             baseline_item = self._baseline[fp]
-            if baseline_item.get("suppressed"):
-                return True, baseline_item.get("suppress_reason", "Previously suppressed")
+            # 하위 호환: 과거 baseline 포맷( suppressed 필드 없음 )도 억제로 간주.
+            if baseline_item.get("suppressed", True):
+                return True, baseline_item.get("suppress_reason", "Baseline match")
 
         return False, None
 
@@ -150,13 +161,14 @@ class FalsePositiveManager:
         suppressed = []
 
         for finding in findings:
-            is_fp, reason = self.is_false_positive(finding)
+            finding_copy = dict(finding)
+            is_fp, reason = self.is_false_positive(finding_copy)
             if is_fp:
-                finding["suppressed"] = True
-                finding["suppress_reason"] = reason
-                suppressed.append(finding)
+                finding_copy["suppressed"] = True
+                finding_copy["suppress_reason"] = reason
+                suppressed.append(finding_copy)
             else:
-                valid.append(finding)
+                valid.append(finding_copy)
 
         return valid, suppressed
 

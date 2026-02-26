@@ -1,5 +1,7 @@
 """설정 및 오탐 관리 테스트"""
 
+import json
+
 import pytest
 
 from config.false_positives import (
@@ -13,6 +15,7 @@ from config.loader import (
     ReportingConfig,
     SecurityActionConfig,
     SemgrepConfig,
+    SonarQubeConfig,
     TrivyConfig,
     find_config_file,
     load_config,
@@ -55,6 +58,16 @@ class TestSecurityActionConfig:
         assert config.ignore_unfixed is True
         assert "library" in config.vuln_type
 
+    def test_sonarqube_config(self):
+        config = SonarQubeConfig(
+            enabled=True,
+            host_url="https://sonar.example.com",
+            project_key="acme_project",
+        )
+        assert config.enabled is True
+        assert config.host_url == "https://sonar.example.com"
+        assert config.project_key == "acme_project"
+
     def test_ai_review_config(self):
         config = AIReviewConfig(
             enabled=True,
@@ -92,10 +105,17 @@ semgrep:
 ai_review:
   enabled: true
   provider: openai
+sonarqube:
+  enabled: true
+  host_url: https://sonar.example.com
+  project_key: demo_project
 """)
         config = load_config(config_path=str(config_file))
         assert config.gitleaks.enabled is False
         assert config.ai_review.enabled is True
+        assert config.sonarqube.enabled is True
+        assert config.sonarqube.host_url == "https://sonar.example.com"
+        assert config.sonarqube.project_key == "demo_project"
 
     def test_find_config_file(self, tmp_path):
         # 설정 파일 없음
@@ -114,6 +134,33 @@ ai_review:
         monkeypatch.setenv("INPUT_FAIL_ON_FINDINGS", "false")
         merged = merge_env_config(cfg)
         assert merged.reporting.fail_on_findings is False
+
+    def test_merge_env_config_parses_spaced_boolean_flags(self, monkeypatch):
+        from config.loader import merge_env_config
+
+        cfg = SecurityActionConfig()
+        cfg.gitleaks.enabled = True
+        cfg.semgrep.enabled = True
+        cfg.trivy.enabled = True
+        cfg.reporting.fail_on_findings = True
+
+        monkeypatch.setenv("INPUT_AI_REVIEW", " On ")
+        monkeypatch.setenv("INPUT_SECRET_SCAN", " 0 ")
+        monkeypatch.setenv("INPUT_CODE_SCAN", " OFF ")
+        monkeypatch.setenv("INPUT_DEPENDENCY_SCAN", " no ")
+        monkeypatch.setenv("INPUT_FAIL_ON_FINDINGS", " 0 ")
+        monkeypatch.setenv("INPUT_SARIF_OUTPUT", " reports/custom.sarif ")
+        monkeypatch.setenv("INPUT_SEVERITY_THRESHOLD", " medium ")
+
+        merged = merge_env_config(cfg)
+
+        assert merged.ai_review.enabled is True
+        assert merged.gitleaks.enabled is False
+        assert merged.semgrep.enabled is False
+        assert merged.trivy.enabled is False
+        assert merged.reporting.fail_on_findings is False
+        assert merged.reporting.sarif_output == "reports/custom.sarif"
+        assert merged.reporting.fail_on_severity == "medium"
 
 
 class TestFPRule:
@@ -160,9 +207,11 @@ class TestFalsePositiveManager:
         assert len(manager.rules) == 1
 
     def test_is_false_positive_by_pattern(self):
-        manager = FalsePositiveManager([
-            FPRule(id="test-fp", pattern="**/test/**", reason="Test file"),
-        ])
+        manager = FalsePositiveManager(
+            [
+                FPRule(id="test-fp", pattern="**/test/**", reason="Test file"),
+            ]
+        )
 
         finding = {
             "scanner": "Gitleaks",
@@ -175,9 +224,11 @@ class TestFalsePositiveManager:
         assert reason == "Test file"
 
     def test_is_false_positive_by_rule_id(self):
-        manager = FalsePositiveManager([
-            FPRule(id="ignore-generic", rule_id="generic\\.secrets\\..*", reason="Too noisy"),
-        ])
+        manager = FalsePositiveManager(
+            [
+                FPRule(id="ignore-generic", rule_id="generic\\.secrets\\..*", reason="Too noisy"),
+            ]
+        )
 
         finding = {
             "scanner": "Semgrep",
@@ -189,9 +240,11 @@ class TestFalsePositiveManager:
         assert is_fp is True
 
     def test_is_false_positive_by_scanner(self):
-        manager = FalsePositiveManager([
-            FPRule(id="ignore-trivy", scanner="Trivy", reason="Ignore all Trivy"),
-        ])
+        manager = FalsePositiveManager(
+            [
+                FPRule(id="ignore-trivy", scanner="Trivy", reason="Ignore all Trivy"),
+            ]
+        )
 
         finding = {"scanner": "Trivy", "rule_id": "CVE-123", "file_path": "req.txt"}
         is_fp, _ = manager.is_false_positive(finding)
@@ -202,9 +255,11 @@ class TestFalsePositiveManager:
         assert is_fp2 is False
 
     def test_filter_findings(self):
-        manager = FalsePositiveManager([
-            FPRule(id="test-fp", pattern="**/test/**"),
-        ])
+        manager = FalsePositiveManager(
+            [
+                FPRule(id="test-fp", pattern="**/test/**"),
+            ]
+        )
 
         findings = [
             {"scanner": "A", "rule_id": "1", "file_path": "src/app.py"},
@@ -218,13 +273,79 @@ class TestFalsePositiveManager:
         assert suppressed[0]["file_path"] == "test/test_app.py"
 
     def test_expired_rule_not_applied(self):
-        manager = FalsePositiveManager([
-            FPRule(id="expired", pattern="**/*", expires="2020-01-01"),
-        ])
+        manager = FalsePositiveManager(
+            [
+                FPRule(id="expired", pattern="**/*", expires="2020-01-01"),
+            ]
+        )
 
         finding = {"scanner": "X", "rule_id": "Y", "file_path": "any.py"}
         is_fp, _ = manager.is_false_positive(finding)
         assert is_fp is False
+
+    def test_filter_findings_does_not_mutate_input(self):
+        manager = FalsePositiveManager([FPRule(id="test-fp", pattern="**/test/**")])
+        findings = [
+            {"scanner": "A", "rule_id": "1", "file_path": "src/app.py"},
+            {"scanner": "A", "rule_id": "2", "file_path": "test/test_app.py"},
+        ]
+        original = [dict(item) for item in findings]
+
+        valid, suppressed = manager.filter_findings(findings)
+
+        assert findings == original
+        assert len(valid) == 1
+        assert len(suppressed) == 1
+        assert suppressed[0]["suppressed"] is True
+        assert "suppress_reason" in suppressed[0]
+
+    def test_baseline_without_suppressed_field_is_applied(self, tmp_path):
+        manager = FalsePositiveManager()
+        finding = {
+            "scanner": "Semgrep",
+            "rule_id": "SG-001",
+            "file_path": "src/app.py",
+            "line_start": 12,
+        }
+
+        baseline_path = tmp_path / ".security-baseline.json"
+        baseline_path.write_text(
+            json.dumps(
+                {
+                    "version": "1.0",
+                    "findings": [finding],  # legacy format: suppressed field omitted
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        manager.load_baseline(baseline_path)
+        is_fp, reason = manager.is_false_positive(dict(finding))
+
+        assert is_fp is True
+        assert reason == "Baseline match"
+
+    def test_save_baseline_persists_suppressed_metadata(self, tmp_path):
+        manager = FalsePositiveManager()
+        baseline_path = tmp_path / ".security-baseline.json"
+        finding = {
+            "scanner": "Trivy",
+            "rule_id": "CVE-123",
+            "file_path": "requirements.txt",
+            "line_start": 1,
+        }
+
+        manager.save_baseline(baseline_path, [finding])
+
+        saved = json.loads(baseline_path.read_text(encoding="utf-8"))
+        assert saved["findings"][0]["suppressed"] is True
+        assert saved["findings"][0]["suppress_reason"] == "Baseline match"
+
+        reloaded = FalsePositiveManager()
+        reloaded.load_baseline(baseline_path)
+        is_fp, reason = reloaded.is_false_positive(dict(finding))
+        assert is_fp is True
+        assert reason == "Baseline match"
 
 
 class TestCreateFPRulesFromConfig:

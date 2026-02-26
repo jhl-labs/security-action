@@ -7,6 +7,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from rich.console import Console
 
@@ -191,6 +192,10 @@ def main() -> int:
 
     # 환경 변수 설정
     workspace = os.path.abspath(args.path)
+    if not os.path.isdir(workspace):
+        console.print(f"[red]Error: scan path is not a directory: {workspace}[/red]")
+        return 2
+
     os.environ["GITHUB_WORKSPACE"] = workspace
     os.environ["INPUT_SECRET_SCAN"] = str(args.secret_scan).lower()
     os.environ["INPUT_CODE_SCAN"] = str(args.code_scan).lower()
@@ -201,6 +206,8 @@ def main() -> int:
     os.environ["INPUT_SEVERITY_THRESHOLD"] = args.severity_threshold
     os.environ["INPUT_FAIL_ON_FINDINGS"] = str(not args.no_fail).lower()
     os.environ["INPUT_PARALLEL"] = str(args.parallel).lower()
+    os.environ["INPUT_VERBOSE"] = str(args.verbose).lower()
+    os.environ["INPUT_QUIET"] = str(args.quiet).lower()
 
     if args.ai_model:
         os.environ["INPUT_AI_MODEL"] = args.ai_model
@@ -215,17 +222,28 @@ def main() -> int:
         os.environ["ANTHROPIC_API_KEY"] = args.anthropic_api_key
     if args.sarif_output:
         os.environ["INPUT_SARIF_OUTPUT"] = args.sarif_output
-    if args.upload_sarif:
-        os.environ["INPUT_UPLOAD_SARIF"] = "true"
-        os.environ["INPUT_SARIF_CATEGORY"] = args.sarif_category
-    if args.fail_on_sarif_upload_error:
-        os.environ["INPUT_FAIL_ON_SARIF_UPLOAD_ERROR"] = "true"
+    if args.json_output:
+        os.environ["INPUT_JSON_OUTPUT"] = args.json_output
+    os.environ["INPUT_UPLOAD_SARIF"] = str(args.upload_sarif).lower()
+    os.environ["INPUT_SARIF_CATEGORY"] = args.sarif_category
+    os.environ["INPUT_FAIL_ON_SARIF_UPLOAD_ERROR"] = str(args.fail_on_sarif_upload_error).lower()
     if args.config:
         os.environ["INPUT_CONFIG_PATH"] = args.config
 
     # 메인 모듈 임포트 및 실행
     try:
-        from main import main as run_main
+        # `python -m cli`(repo root)에서도 `main`/`scanners` 절대 import가 동작하도록
+        # src 디렉토리를 우선 경로에 보장한다.
+        src_dir = Path(__file__).resolve().parent
+        src_dir_str = str(src_dir)
+        if src_dir_str not in sys.path:
+            sys.path.insert(0, src_dir_str)
+
+        try:
+            from main import main as run_main
+        except ImportError:
+            # `python -m cli`를 리포지토리 루트에서 직접 실행할 때 fallback
+            from src.main import main as run_main
 
         return run_main()
     except KeyboardInterrupt:

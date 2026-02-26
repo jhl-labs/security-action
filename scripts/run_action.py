@@ -31,5 +31,6 @@ if __name__ == "__main__":
 
     # main 모듈 실행
     from main import main
+
     exit_code = main()
     sys.exit(exit_code)

@@ -43,6 +43,14 @@ class TrivyConfig(ScannerConfig):
     ignorefile_path: str | None = None
 
 
+class SonarQubeConfig(BaseModel):
+    """SonarQube 설정"""
+
+    enabled: bool = False
+    host_url: str = "http://localhost:9000"
+    project_key: str | None = None
+
+
 class AIReviewConfig(BaseModel):
     """AI 리뷰 설정"""
 
@@ -85,6 +93,7 @@ class SecurityActionConfig(BaseModel):
     gitleaks: GitleaksConfig = Field(default_factory=GitleaksConfig)
     semgrep: SemgrepConfig = Field(default_factory=SemgrepConfig)
     trivy: TrivyConfig = Field(default_factory=TrivyConfig)
+    sonarqube: SonarQubeConfig = Field(default_factory=SonarQubeConfig)
     ai_review: AIReviewConfig = Field(default_factory=AIReviewConfig)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
     false_positives: list[FalsePositiveRule] = Field(default_factory=list)
@@ -140,7 +149,7 @@ def load_config(
 
     # YAML 로드
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return SecurityActionConfig(**data)
     except Exception as e:
@@ -150,28 +159,47 @@ def load_config(
 
 def merge_env_config(config: SecurityActionConfig) -> SecurityActionConfig:
     """환경 변수로 설정 오버라이드"""
+
+    def _env_to_bool(name: str) -> bool | None:
+        raw = os.getenv(name)
+        if raw is None:
+            return None
+        normalized = raw.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        return None
+
     # AI 설정
-    if os.getenv("INPUT_AI_REVIEW", "").lower() == "true":
-        config.ai_review.enabled = True
+    ai_review_env = _env_to_bool("INPUT_AI_REVIEW")
+    if ai_review_env is not None:
+        config.ai_review.enabled = ai_review_env
     if os.getenv("INPUT_OPENAI_API_KEY"):
         config.ai_review.provider = "openai"
     elif os.getenv("INPUT_ANTHROPIC_API_KEY"):
         config.ai_review.provider = "anthropic"
 
     # 스캐너 활성화
-    if os.getenv("INPUT_SECRET_SCAN", "").lower() == "false":
-        config.gitleaks.enabled = False
-    if os.getenv("INPUT_CODE_SCAN", "").lower() == "false":
-        config.semgrep.enabled = False
-    if os.getenv("INPUT_DEPENDENCY_SCAN", "").lower() == "false":
-        config.trivy.enabled = False
+    secret_scan_env = _env_to_bool("INPUT_SECRET_SCAN")
+    if secret_scan_env is not None:
+        config.gitleaks.enabled = secret_scan_env
+    code_scan_env = _env_to_bool("INPUT_CODE_SCAN")
+    if code_scan_env is not None:
+        config.semgrep.enabled = code_scan_env
+    dependency_scan_env = _env_to_bool("INPUT_DEPENDENCY_SCAN")
+    if dependency_scan_env is not None:
+        config.trivy.enabled = dependency_scan_env
 
     # 리포팅
-    if os.getenv("INPUT_SARIF_OUTPUT"):
-        config.reporting.sarif_output = os.getenv("INPUT_SARIF_OUTPUT")
-    if os.getenv("INPUT_SEVERITY_THRESHOLD"):
-        config.reporting.fail_on_severity = os.getenv("INPUT_SEVERITY_THRESHOLD")
-    if os.getenv("INPUT_FAIL_ON_FINDINGS", "").lower() == "false":
-        config.reporting.fail_on_findings = False
+    sarif_output_env = os.getenv("INPUT_SARIF_OUTPUT")
+    if isinstance(sarif_output_env, str) and sarif_output_env.strip():
+        config.reporting.sarif_output = sarif_output_env.strip()
+    severity_env = os.getenv("INPUT_SEVERITY_THRESHOLD")
+    if isinstance(severity_env, str) and severity_env.strip():
+        config.reporting.fail_on_severity = severity_env.strip()
+    fail_on_findings_env = _env_to_bool("INPUT_FAIL_ON_FINDINGS")
+    if fail_on_findings_env is not None:
+        config.reporting.fail_on_findings = fail_on_findings_env
 
     return config
