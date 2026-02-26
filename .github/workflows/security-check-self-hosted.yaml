@@ -1,0 +1,229 @@
+name: Security Check (Self-hosted)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * 0'  # 매주 일요일 자정 (UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: security-check-self-hosted-${{ github.ref }}
+  cancel-in-progress: true
+
+# =============================================================================
+# 🛡️ Security Report (Self-hosted) - Required Status Check
+# This workflow is specifically for testing the action on self-hosted runners.
+# =============================================================================
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 🛡️ Security Jobs
+  # ─────────────────────────────────────────────────────────────────────────
+  security-scan:
+    name: 🛡️ Security Scan
+    runs-on: jhl-space
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      statuses: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Run Security Scan
+        id: scan
+        uses: ./
+        with:
+          # 기본 스캐너 (모두 활성화)
+          secret-scan: 'true'
+          secret-scan-history: ${{ github.event_name == 'schedule' }}
+          code-scan: 'true'
+          dependency-scan: 'true'
+
+          # IaC 스캔
+          iac-scan: 'true'
+          iac-frameworks: 'dockerfile,github_actions,kubernetes'
+
+          # 네이티브 의존성 스캔
+          native-audit: 'true'
+          native-audit-tools: 'auto'
+
+          # SBOM 생성
+          sbom-generate: 'true'
+          sbom-format: 'cyclonedx-json'
+          sbom-output: 'sbom.json'
+
+          # 공통 설정
+          check-name: '🛡️ Security Report (Self-hosted)'
+          severity-threshold: 'high'
+          fail-on-findings: 'false'
+          post-summary: 'false'
+          sarif-output: 'security-results.sarif'
+          upload-sarif: 'false'
+          sarif-category: 'security-scan-self-hosted'
+          fail-on-sarif-upload-error: 'false'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload SBOM Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: sbom-source-self-hosted
+          path: sbom.json
+          retention-days: 90
+
+      - name: Upload SARIF Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: sarif-security-self-hosted
+          path: security-results.sarif
+          retention-days: 90
+
+    outputs:
+      findings-count: ${{ steps.scan.outputs.findings-count }}
+      critical-count: ${{ steps.scan.outputs.critical-count }}
+      high-count: ${{ steps.scan.outputs.high-count }}
+      sarif-file: ${{ steps.scan.outputs.sarif-file }}
+      sarif-upload-id: ${{ steps.scan.outputs.sarif-upload-id }}
+      sbom-file: ${{ steps.scan.outputs.sbom-file }}
+
+  container-scan:
+    name: 🛡️ Container Scan
+    runs-on: jhl-space
+    permissions:
+      contents: read
+      checks: write
+      statuses: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build Image for Scan
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: security-action:self-hosted-scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Container Scan
+        id: scan
+        uses: ./
+        with:
+          secret-scan: 'false'
+          code-scan: 'false'
+          dependency-scan: 'false'
+          container-scan: 'true'
+          container-image: 'security-action:self-hosted-scan'
+          sbom-generate: 'true'
+          sbom-format: 'cyclonedx-json'
+          sbom-output: 'container-sbom.json'
+
+          # 공통 설정
+          skip-check: 'true'
+          severity-threshold: 'critical'
+          fail-on-findings: 'false'
+          post-summary: 'false'
+          sarif-output: 'container-scan.sarif'
+          upload-sarif: 'false'
+          sarif-category: 'container-scan-self-hosted'
+          fail-on-sarif-upload-error: 'false'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Container SBOM Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: sbom-container-self-hosted
+          path: container-sbom.json
+          retention-days: 90
+
+      - name: Upload Container SARIF Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: sarif-container-self-hosted
+          path: container-scan.sarif
+          retention-days: 90
+
+    outputs:
+      findings-count: ${{ steps.scan.outputs.findings-count }}
+      critical-count: ${{ steps.scan.outputs.critical-count }}
+      high-count: ${{ steps.scan.outputs.high-count }}
+      sarif-upload-id: ${{ steps.scan.outputs.sarif-upload-id }}
+
+  lint:
+    name: 🔧 Lint
+    runs-on: jhl-space
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run Ruff
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install ruff==0.14.4
+          ruff check .
+          ruff format --check .
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 📊 Report Job (통합 리포트)
+  # ─────────────────────────────────────────────────────────────────────────
+  report:
+    name: 📊 Report
+    runs-on: jhl-space
+    needs: [security-scan, container-scan, lint]
+    if: always()
+
+    steps:
+      - name: Generate Security Report
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          # 🛡️ Security Scan Report (Self-hosted)
+
+          ## 📈 Overview
+          | Scan Type | Findings | Critical | High |
+          |-----------|----------|----------|------|
+          | 🔍 Code & Dependencies | ${{ needs.security-scan.outputs.findings-count || 'N/A' }} | ${{ needs.security-scan.outputs.critical-count || '0' }} | ${{ needs.security-scan.outputs.high-count || '0' }} |
+          | 🐳 Container Image | ${{ needs.container-scan.outputs.findings-count || 'N/A' }} | ${{ needs.container-scan.outputs.critical-count || '0' }} | ${{ needs.container-scan.outputs.high-count || '0' }} |
+
+          ## 🛡️ Enabled Scanners
+          | Scanner | Tool | Status |
+          |---------|------|--------|
+          | 🔐 Secret Scan | Gitleaks | ✅ Enabled (history on schedule) |
+          | 🔍 Code Scan (SAST) | Semgrep | ✅ Enabled |
+          | 📦 Dependency Scan (SCA) | Trivy | ✅ Enabled |
+          | 🏗️ IaC Scan | Checkov | ✅ Enabled |
+          | 🐳 Container Scan | Trivy | ✅ Enabled |
+          | 📋 SBOM Generation | Syft | ✅ Enabled |
+
+          ## 📦 Artifacts
+          | Type | File | Description |
+          |------|------|-------------|
+          | SARIF | `security-results.sarif` | Static analysis results |
+          | SARIF | `container-scan.sarif` | Container vulnerabilities |
+          | SBOM | `sbom.json` | Source code dependencies |
+          | SBOM | `container-sbom.json` | Container image components |
+
+          ## 🔧 Workflow Status
+          | Job | Status |
+          |-----|--------|
+          | 🔧 Lint | ${{ needs.lint.result }} |
+
+          ---
+          *Executed on self-hosted runner: `jhl-space`*
+          EOF
