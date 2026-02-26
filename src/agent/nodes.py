@@ -1,6 +1,8 @@
 """Agent 노드 구현"""
 
 import json
+import posixpath
+import re
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -23,16 +25,101 @@ from .state import (
     SecurityReview,
 )
 
+SENSITIVE_CONTEXT_PLACEHOLDER = "[REDACTED: sensitive code omitted for AI safety]"
+_SECRET_FINDER_KEYWORDS = (
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "private key",
+    "apikey",
+    "api key",
+    "auth",
+)
+
+
+def _redact_sensitive_text(text: str) -> str:
+    """LLM 전송 전 민감정보를 마스킹한다."""
+    value = str(text or "")
+    if not value:
+        return value
+
+    redacted = value
+    redacted = re.sub(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        "***REDACTED_PRIVATE_KEY***",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"(?i)\b(authorization)\s*:\s*bearer\s+[^\s]+",
+        r"\1: Bearer ***REDACTED***",
+        redacted,
+    )
+    redacted = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{8,}", "Bearer ***REDACTED***", redacted)
+    redacted = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b", "***REDACTED***", redacted)
+    redacted = re.sub(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "***REDACTED***", redacted)
+    redacted = re.sub(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{12,}\b", "***REDACTED***", redacted)
+    redacted = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "***REDACTED***", redacted)
+    redacted = re.sub(
+        r"(?i)\b(api[_-]?key|token|password|secret)\b\s*[:=]\s*([^\s,;]+)",
+        r"\1=***REDACTED***",
+        redacted,
+    )
+    return redacted
+
+
+def _is_secret_related_finding(finding: dict | None) -> bool:
+    """finding이 secret/credential 유출 성격인지 판단."""
+    if not finding:
+        return False
+
+    scanner = str(finding.get("scanner", "")).lower()
+    if "gitleaks" in scanner or "secret" in scanner:
+        return True
+
+    combined = " ".join(
+        [
+            str(finding.get("rule_id", "")),
+            str(finding.get("message", "")),
+        ]
+    ).lower()
+    return any(keyword in combined for keyword in _SECRET_FINDER_KEYWORDS)
+
+
+def _sanitize_context_for_prompt(
+    finding: dict | None, context: CodeContext | None
+) -> tuple[str, str]:
+    """프롬프트 전송용 코드 컨텍스트를 안전하게 변환."""
+    if context is None:
+        return "[No code available]", ""
+
+    if _is_secret_related_finding(finding):
+        return SENSITIVE_CONTEXT_PLACEHOLDER, ""
+
+    snippet = _redact_sensitive_text(context.code_snippet)
+    surrounding = _redact_sensitive_text(context.surrounding_code)
+    if not snippet.strip():
+        snippet = "[No code available]"
+
+    return snippet, surrounding
+
 
 def get_llm(config: AgentConfig):
     """LLM 인스턴스 생성"""
     if config.model_provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
+        kwargs = {
+            "model": config.model_name,
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+        }
+        if config.anthropic_api_key:
+            kwargs["api_key"] = config.anthropic_api_key
+
         return ChatAnthropic(
-            model=config.model_name,
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
+            **kwargs,
         )
     else:  # openai
         from langchain_openai import ChatOpenAI
@@ -42,6 +129,8 @@ def get_llm(config: AgentConfig):
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
         }
+        if config.openai_api_key:
+            kwargs["api_key"] = config.openai_api_key
         if config.openai_base_url:
             kwargs["base_url"] = config.openai_base_url
 
@@ -88,14 +177,46 @@ def extract_code_context(
     context_lines: int = 10,
 ) -> CodeContext:
     """파일에서 코드 컨텍스트 추출"""
-    full_path = Path(workspace) / file_path
+    try:
+        safe_line_start = max(1, int(line_start))
+    except (TypeError, ValueError):
+        safe_line_start = 1
+
+    if line_end is None:
+        safe_line_end = safe_line_start
+    else:
+        try:
+            safe_line_end = max(safe_line_start, int(line_end))
+        except (TypeError, ValueError):
+            safe_line_end = safe_line_start
+
+    if not str(file_path).strip():
+        return CodeContext(
+            file_path=file_path,
+            start_line=safe_line_start,
+            end_line=safe_line_end,
+            code_snippet="[File path not provided]",
+            language="text",
+        )
+
+    workspace_root = Path(workspace).resolve()
+    full_path = _resolve_context_path(workspace_root, file_path, workspace)
     language = detect_language(file_path)
+
+    if full_path is None:
+        return CodeContext(
+            file_path=file_path,
+            start_line=safe_line_start,
+            end_line=safe_line_end,
+            code_snippet="[File outside workspace]",
+            language=language,
+        )
 
     if not full_path.exists():
         return CodeContext(
             file_path=file_path,
-            start_line=line_start,
-            end_line=line_end or line_start,
+            start_line=safe_line_start,
+            end_line=safe_line_end,
             code_snippet="[File not found]",
             language=language,
         )
@@ -105,22 +226,21 @@ def extract_code_context(
             lines = f.readlines()
 
         total_lines = len(lines)
-        line_end = line_end or line_start
 
         # 메인 코드 스니펫 (1-indexed to 0-indexed)
-        snippet_start = max(0, line_start - 1)
-        snippet_end = min(total_lines, line_end)
+        snippet_start = max(0, safe_line_start - 1)
+        snippet_end = min(total_lines, safe_line_end)
         code_snippet = "".join(lines[snippet_start:snippet_end])
 
         # 주변 코드 (context)
-        context_start = max(0, line_start - 1 - context_lines)
-        context_end = min(total_lines, line_end + context_lines)
+        context_start = max(0, safe_line_start - 1 - context_lines)
+        context_end = min(total_lines, safe_line_end + context_lines)
         surrounding_code = "".join(lines[context_start:context_end])
 
         return CodeContext(
             file_path=file_path,
-            start_line=line_start,
-            end_line=line_end,
+            start_line=safe_line_start,
+            end_line=safe_line_end,
             code_snippet=code_snippet.strip(),
             surrounding_code=surrounding_code.strip(),
             language=language,
@@ -128,11 +248,92 @@ def extract_code_context(
     except Exception as e:
         return CodeContext(
             file_path=file_path,
-            start_line=line_start,
-            end_line=line_end or line_start,
+            start_line=safe_line_start,
+            end_line=safe_line_end,
             code_snippet=f"[Error reading file: {e}]",
             language=language,
         )
+
+
+def _is_windows_absolute_path(path: str) -> bool:
+    """Windows 절대경로 여부 확인 (예: C:/repo/file.py)."""
+    normalized = str(path or "").replace("\\", "/")
+    return len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/"
+
+
+def _normalize_windows_absolute_path(path: str) -> str | None:
+    """Windows 절대경로를 비교용으로 정규화한다.
+
+    - 구분자 통일 (`\\` -> `/`)
+    - 드라이브 문자를 대문자로 정규화
+    - `.` / `..` 세그먼트 제거
+    """
+    raw = str(path or "").replace("\\", "/").strip()
+    if not _is_windows_absolute_path(raw):
+        return None
+
+    drive = raw[0].upper()
+    tail = "/" + raw[2:].lstrip("/")
+    normalized_tail = posixpath.normpath(tail)
+    return f"{drive}:{normalized_tail}"
+
+
+def _is_within_workspace(resolved: Path, workspace_root: Path) -> bool:
+    """경로가 workspace 내부인지 확인 (Windows 대소문자 차이 허용)."""
+    if resolved == workspace_root or workspace_root in resolved.parents:
+        return True
+
+    resolved_norm = str(resolved).replace("\\", "/").rstrip("/")
+    workspace_norm = str(workspace_root).replace("\\", "/").rstrip("/")
+
+    if _is_windows_absolute_path(resolved_norm) and _is_windows_absolute_path(workspace_norm):
+        resolved_fold = resolved_norm.casefold()
+        workspace_fold = workspace_norm.casefold()
+        return resolved_fold == workspace_fold or resolved_fold.startswith(workspace_fold + "/")
+
+    return False
+
+
+def _resolve_context_path(
+    workspace_root: Path,
+    file_path: str,
+    workspace_raw: str | None = None,
+) -> Path | None:
+    """컨텍스트 파일 경로를 workspace 내부로 제한해 해석."""
+    raw_workspace = str(workspace_raw or "").replace("\\", "/").strip()
+    raw_file_path = str(file_path or "").replace("\\", "/").strip()
+
+    # Cross-platform(예: Linux CI에서 Windows 경로 테스트)에서도
+    # Windows 절대경로를 workspace 기준으로 정확히 판정한다.
+    windows_workspace = _normalize_windows_absolute_path(raw_workspace)
+    windows_file = _normalize_windows_absolute_path(raw_file_path)
+    if windows_file:
+        if not windows_workspace:
+            return None
+        workspace_fold = windows_workspace.casefold().rstrip("/")
+        file_fold = windows_file.casefold().rstrip("/")
+        if file_fold == workspace_fold:
+            return workspace_root
+        if file_fold.startswith(workspace_fold + "/"):
+            relative_path = windows_file[len(windows_workspace) :].lstrip("/")
+            if not relative_path:
+                return workspace_root
+            return workspace_root / Path(relative_path)
+        return None
+
+    candidate = Path(file_path)
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None
+
+    if _is_within_workspace(resolved, workspace_root):
+        return resolved
+
+    return None
 
 
 def parse_json_response(response: str) -> dict:
@@ -185,17 +386,19 @@ def analyze_findings_node(state: AgentState, config: AgentConfig) -> AgentState:
 
     for i, finding in enumerate(state.findings[: config.max_findings_to_review]):
         context = state.code_contexts[i] if i < len(state.code_contexts) else None
+        safe_code_snippet, safe_surrounding_code = _sanitize_context_for_prompt(finding, context)
+        safe_message = _redact_sensitive_text(str(finding.get("message", "")))
 
         prompt = ANALYZE_FINDING_PROMPT.format(
             scanner=finding.get("scanner", "Unknown"),
             rule_id=finding.get("rule_id", "unknown"),
             severity=finding.get("severity", "medium"),
-            message=finding.get("message", ""),
+            message=safe_message,
             file_path=finding.get("file_path", ""),
             line_start=finding.get("line_start", 0),
             language=context.language if context else "text",
-            code_snippet=context.code_snippet if context else "[No code available]",
-            surrounding_code=context.surrounding_code if context else "",
+            code_snippet=safe_code_snippet,
+            surrounding_code=safe_surrounding_code,
         )
 
         messages = [
@@ -255,6 +458,8 @@ def generate_remediations_node(state: AgentState, config: AgentConfig) -> AgentS
             continue
 
         context = state.code_contexts[i] if i < len(state.code_contexts) else None
+        original_finding = state.findings[i] if i < len(state.findings) else None
+        safe_code_snippet, _ = _sanitize_context_for_prompt(original_finding, context)
 
         prompt = GENERATE_REMEDIATION_PROMPT.format(
             category=analysis.category.value,
@@ -263,7 +468,7 @@ def generate_remediations_node(state: AgentState, config: AgentConfig) -> AgentS
             description=analysis.description,
             impact=analysis.impact,
             language=context.language if context else "text",
-            code_snippet=context.code_snippet if context else "[No code available]",
+            code_snippet=safe_code_snippet,
         )
 
         messages = [
@@ -354,13 +559,14 @@ def generate_summary_node(state: AgentState, config: AgentConfig) -> AgentState:
     llm = get_llm(config)
 
     # 심각도별 카운트
-    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     categories = set()
     key_findings = []
 
     for analysis in state.analyses:
         if not analysis.is_false_positive:
-            severity_counts[analysis.severity.value] += 1
+            severity_key = analysis.severity.value
+            severity_counts[severity_key] = severity_counts.get(severity_key, 0) + 1
             categories.add(analysis.category.value)
             if analysis.severity in [ReviewSeverity.CRITICAL, ReviewSeverity.HIGH]:
                 key_findings.append(f"- {analysis.title}")
