@@ -5,6 +5,7 @@ from .code_scanner import CodeScanner
 from .container_scanner import ContainerScanner
 from .dependency_scanner import DependencyScanner
 from .iac_scanner import IaCScanner
+from .native_audit_scanner import NativeAuditScanner
 from .parallel import ParallelScanner, ScanCache
 from .sbom_generator import SBOMGenerator, generate_sbom
 from .secret_scanner import SecretScanner
@@ -18,6 +19,7 @@ __all__ = [
     "Finding",
     "generate_sbom",
     "IaCScanner",
+    "NativeAuditScanner",
     "ParallelScanner",
     "SBOMGenerator",
     "ScanCache",

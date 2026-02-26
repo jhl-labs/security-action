@@ -1,10 +1,13 @@
 """Base Scanner Interface"""
 
-import subprocess
+import os
+import shutil
+import subprocess  # nosec B404
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -69,9 +72,79 @@ class BaseScanner(ABC):
         "/github/workspace",
         "/home/runner/work/",
     ]
+    GH_ACTIONS_SAFE_PATH_PREFIXES = (
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/opt/sonar-scanner/bin",
+        "/root/.cargo/bin",
+        "/usr/local/go/bin",
+        "/root/go/bin",
+    )
 
     def __init__(self, workspace: str):
         self.workspace = workspace
+
+    def _build_safe_env(self, env: dict[str, str] | None = None) -> dict[str, str]:
+        """명령 실행용 환경 변수 구성.
+
+        - 기본적으로 현재 프로세스 환경을 상속한다.
+        - PATH의 빈 항목/`.`/workspace 하위 경로를 제거해
+          저장소 내부 악성 바이너리 하이재킹 가능성을 낮춘다.
+        """
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+
+        path_value = merged_env.get("PATH", "")
+        if not path_value:
+            return merged_env
+
+        workspace_resolved: Path | None
+        try:
+            workspace_resolved = Path(self.workspace).resolve(strict=False)
+        except Exception:
+            workspace_resolved = None
+
+        safe_entries: list[str] = []
+        seen: set[str] = set()
+        for raw_entry in path_value.split(os.pathsep):
+            entry = raw_entry.strip()
+            if not entry or entry == ".":
+                continue
+
+            # 상대 경로 PATH 엔트리는 실행 위치에 따라 해석이 달라져
+            # 하이재킹 표면을 키우므로 제외한다.
+            if not Path(entry).is_absolute():
+                continue
+
+            if workspace_resolved is not None:
+                try:
+                    entry_path = Path(entry).resolve(strict=False)
+                except Exception:
+                    entry_path = None
+
+                if entry_path is not None and (
+                    entry_path == workspace_resolved or workspace_resolved in entry_path.parents
+                ):
+                    continue
+
+            if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+                if not any(
+                    entry == prefix or entry.startswith(prefix + os.sep)
+                    for prefix in self.GH_ACTIONS_SAFE_PATH_PREFIXES
+                ):
+                    continue
+
+            if entry not in seen:
+                safe_entries.append(entry)
+                seen.add(entry)
+
+        merged_env["PATH"] = os.pathsep.join(safe_entries)
+
+        return merged_env
 
     def normalize_path(self, file_path: str) -> str:
         """파일 경로 정규화 - Docker 컨테이너 경로를 상대 경로로 변환
@@ -89,21 +162,34 @@ class BaseScanner(ABC):
         if not file_path:
             return file_path
 
+        normalized_by_workspace = False
+
         # Docker 컨테이너 경로 prefix 제거
         for prefix in self.WORKSPACE_PREFIXES:
             if file_path.startswith(prefix):
                 file_path = file_path[len(prefix) :]
+                normalized_by_workspace = True
                 break
 
         # workspace 경로도 제거 (예: /home/vtopia/git/... 등)
-        if self.workspace and file_path.startswith(self.workspace):
-            file_path = file_path[len(self.workspace) :]
-            if file_path.startswith("/"):
-                file_path = file_path[1:]
+        # 경계(`/`)를 확인해 /repo 와 /repo2 같은 유사 prefix 오탐을 방지한다.
+        if self.workspace:
+            normalized_workspace = self.workspace.replace("\\", "/").rstrip("/")
+            normalized_path = file_path.replace("\\", "/")
 
-        # 선행 슬래시 제거
-        while file_path.startswith("/"):
-            file_path = file_path[1:]
+            if normalized_workspace and (
+                normalized_path == normalized_workspace
+                or normalized_path.startswith(normalized_workspace + "/")
+            ):
+                normalized_path = normalized_path[len(normalized_workspace) :]
+                file_path = normalized_path
+                normalized_by_workspace = True
+
+        # workspace 내부 경로를 상대경로로 만든 경우에만 선행 슬래시를 제거한다.
+        # 외부 절대경로까지 상대경로화하면 잘못된 annotation 경로를 만들 수 있다.
+        if normalized_by_workspace:
+            while file_path.startswith("/"):
+                file_path = file_path[1:]
 
         return file_path
 
@@ -159,11 +245,44 @@ class BaseScanner(ABC):
         Returns:
             subprocess.CompletedProcess
         """
-        return subprocess.run(
-            cmd,
-            cwd=cwd or self.workspace,
-            capture_output=capture_output,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        if not cmd:
+            raise ValueError("Command must not be empty")
+
+        safe_env = self._build_safe_env(env)
+        workspace_path = Path(self.workspace).resolve(strict=False)
+        requested_cwd = cwd if cwd else self.workspace
+        requested_cwd_path = Path(requested_cwd).expanduser()
+        if not requested_cwd_path.is_absolute():
+            requested_cwd_path = workspace_path / requested_cwd_path
+        resolved_cwd = requested_cwd_path.resolve(strict=False)
+
+        if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+            if not (resolved_cwd == workspace_path or workspace_path in resolved_cwd.parents):
+                raise ValueError(
+                    f"Command cwd must stay within workspace in GitHub Actions: {requested_cwd}"
+                )
+
+        resolved_cmd = list(cmd)
+        executable = resolved_cmd[0]
+
+        # PATH 검색형 명령은 절대 경로로 고정해 실행 시점 하이재킹 위험을 줄인다.
+        if "/" not in executable and "\\" not in executable:
+            resolved_executable = shutil.which(executable, path=safe_env.get("PATH"))
+            if resolved_executable:
+                resolved_cmd[0] = resolved_executable
+
+        # Bandit B603: command is list-based with shell=False and sanitized PATH/env.
+        try:
+            return subprocess.run(  # nosec B603
+                resolved_cmd,
+                cwd=str(resolved_cwd),
+                capture_output=capture_output,
+                text=True,
+                timeout=timeout,
+                env=safe_env,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Required tool not found in PATH: {executable}. "
+                "Install the scanner dependency in the runner environment."
+            ) from exc

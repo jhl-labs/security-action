@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import tempfile
+from fnmatch import fnmatch
 from pathlib import Path
 
 from .base import BaseScanner, Finding, Severity
@@ -50,6 +51,26 @@ class IaCScanner(BaseScanner):
         "github_actions": [".github/workflows/*.yml", ".github/workflows/*.yaml"],
         "helm": ["Chart.yaml", "values.yaml"],
     }
+    EXCLUDED_SCAN_DIRS = {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+        "node_modules",
+        "vendor",
+        "dist",
+        "build",
+    }
+    DEFAULT_SKIP_PATH_REGEX = (
+        r"(^|/)(\.git|\.hg|\.svn|\.venv|venv|\.tox|__pycache__|"
+        r"node_modules|vendor|dist|build)(/|$)"
+    )
 
     def __init__(
         self,
@@ -62,39 +83,125 @@ class IaCScanner(BaseScanner):
         self.frameworks = frameworks or self._detect_frameworks()
         self.skip_checks = skip_checks or os.getenv("INPUT_IAC_SKIP_CHECKS", "").split(",")
         self.skip_checks = [c.strip() for c in self.skip_checks if c.strip()]
-        self.external_checks_dir = external_checks_dir or os.getenv("INPUT_IAC_CUSTOM_CHECKS")
+        self.external_checks_dir = self._resolve_external_checks_dir(
+            external_checks_dir or os.getenv("INPUT_IAC_CUSTOM_CHECKS")
+        )
 
     @property
     def name(self) -> str:
         return "Checkov"
 
-    def _detect_frameworks(self) -> list[str]:
-        """워크스페이스에서 IaC 프레임워크 자동 감지"""
-        detected = []
+    @classmethod
+    def _should_skip_scan_dir(cls, directory_name: str) -> bool:
+        return directory_name in cls.EXCLUDED_SCAN_DIRS
+
+    def _iter_workspace_files(self):
+        """workspace 내부 파일을 순회하되 공통 vendor/cache 디렉토리는 제외한다."""
         workspace_path = Path(self.workspace)
 
-        # Terraform
-        if list(workspace_path.rglob("*.tf")):
-            detected.append("terraform")
+        for root, dirs, files in os.walk(workspace_path, topdown=True):
+            dirs[:] = [d for d in dirs if not self._should_skip_scan_dir(d)]
+            root_path = Path(root)
+            relative_root = root_path.relative_to(workspace_path)
 
-        # Kubernetes / Helm
-        if list(workspace_path.rglob("*.yaml")) or list(workspace_path.rglob("*.yml")):
-            detected.append("kubernetes")
-        if (workspace_path / "Chart.yaml").exists():
-            detected.append("helm")
+            for file_name in files:
+                if relative_root == Path("."):
+                    rel_path = file_name
+                else:
+                    rel_path = f"{relative_root.as_posix()}/{file_name}"
+                yield file_name, rel_path, root_path / file_name
 
-        # Dockerfile
-        if list(workspace_path.rglob("Dockerfile*")):
-            detected.append("dockerfile")
+    @staticmethod
+    def _looks_like_cloudformation_template(file_path: Path) -> bool:
+        """CloudFormation 템플릿 시그니처 기반 판별.
 
-        # GitHub Actions
-        if (workspace_path / ".github" / "workflows").exists():
-            detected.append("github_actions")
+        단순 확장자(`*.json`)만으로는 package.json 같은 일반 파일을 오탐지하므로
+        내용에 CloudFormation 특징 키워드가 있는 경우에만 감지한다.
+        """
+        try:
+            if not file_path.is_file():
+                return False
+            if file_path.stat().st_size > 512 * 1024:
+                return False
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
 
-        # CloudFormation
-        for f in workspace_path.rglob("*.template"):
-            detected.append("cloudformation")
-            break
+        if not content.strip():
+            return False
+
+        lowered = content.lower()
+        name_lower = file_path.name.lower()
+        path_lower = file_path.as_posix().lower()
+
+        strong_signals = (
+            "awstemplateformatversion",
+            "aws::serverless",
+            "aws::cloudformation",
+        )
+        if any(signal in lowered for signal in strong_signals):
+            return True
+
+        if "resources" in lowered and "aws::" in lowered:
+            return True
+
+        filename_hints = ("cloudformation", "cfn", "template", "sam")
+        if any(hint in name_lower or hint in path_lower for hint in filename_hints):
+            return "resources" in lowered or "aws::" in lowered
+
+        return False
+
+    def _detect_frameworks(self) -> list[str]:
+        """워크스페이스에서 IaC 프레임워크 자동 감지"""
+        detected_flags = {
+            "terraform": False,
+            "kubernetes": False,
+            "helm": False,
+            "dockerfile": False,
+            "github_actions": False,
+            "cloudformation": False,
+        }
+
+        for file_name, rel_path, file_path in self._iter_workspace_files():
+            if not detected_flags["terraform"] and any(
+                fnmatch(file_name, pattern) for pattern in self.IAC_PATTERNS["terraform"]
+            ):
+                detected_flags["terraform"] = True
+
+            if not detected_flags["kubernetes"] and any(
+                fnmatch(file_name, pattern) for pattern in self.IAC_PATTERNS["kubernetes"]
+            ):
+                detected_flags["kubernetes"] = True
+
+            if not detected_flags["helm"] and any(
+                fnmatch(file_name, pattern) for pattern in self.IAC_PATTERNS["helm"]
+            ):
+                detected_flags["helm"] = True
+
+            if not detected_flags["dockerfile"] and any(
+                fnmatch(file_name, pattern) for pattern in self.IAC_PATTERNS["dockerfile"]
+            ):
+                detected_flags["dockerfile"] = True
+
+            if not detected_flags["github_actions"] and any(
+                fnmatch(rel_path, pattern) for pattern in self.IAC_PATTERNS["github_actions"]
+            ):
+                detected_flags["github_actions"] = True
+
+            if not detected_flags["cloudformation"] and any(
+                fnmatch(file_name, pattern) for pattern in ["*.template"]
+            ):
+                detected_flags["cloudformation"] = True
+            elif not detected_flags["cloudformation"] and any(
+                fnmatch(file_name, pattern) for pattern in ["*.json", "*.yaml", "*.yml"]
+            ):
+                if self._looks_like_cloudformation_template(file_path):
+                    detected_flags["cloudformation"] = True
+
+            if all(detected_flags.values()):
+                break
+
+        detected = [name for name, enabled in detected_flags.items() if enabled]
 
         logger.info(f"Detected IaC frameworks: {detected if detected else 'none'}")
         return detected
@@ -131,6 +238,9 @@ class IaCScanner(BaseScanner):
             if self.skip_checks:
                 cmd.extend(["--skip-check", ",".join(self.skip_checks)])
 
+            # 공통 대용량/서드파티 디렉토리를 기본 제외해 속도와 노이즈를 줄인다.
+            cmd.extend(["--skip-path", self.DEFAULT_SKIP_PATH_REGEX])
+
             # 커스텀 체크 디렉토리
             if self.external_checks_dir and Path(self.external_checks_dir).exists():
                 cmd.extend(["--external-checks-dir", self.external_checks_dir])
@@ -145,7 +255,7 @@ class IaCScanner(BaseScanner):
             # 결과 파싱
             report_file = Path(report_path)
             if report_file.exists() and report_file.stat().st_size > 0:
-                with open(report_path) as f:
+                with open(report_path, encoding="utf-8") as f:
                     content = f.read()
                     if content.strip():
                         data = json.loads(content)
@@ -203,12 +313,14 @@ class IaCScanner(BaseScanner):
 
         # 라인 정보
         file_line_range = check.get("file_line_range", [1, 1])
-        line_start = file_line_range[0] if isinstance(file_line_range, list) else 1
-        line_end = (
-            file_line_range[1]
-            if isinstance(file_line_range, list) and len(file_line_range) > 1
-            else None
-        )
+        line_start = 1
+        line_end = None
+        if isinstance(file_line_range, list) and file_line_range:
+            line_start = self._safe_line(file_line_range[0], default=1)
+            if len(file_line_range) > 1:
+                line_end = self._safe_line(file_line_range[1], default=line_start)
+                if line_end < line_start:
+                    line_end = line_start
 
         guideline = check.get("guideline", "")
         suggestion = guideline if guideline else check.get("check_name", "")
@@ -230,3 +342,33 @@ class IaCScanner(BaseScanner):
                 "evaluations": check.get("evaluations"),
             },
         )
+
+    @staticmethod
+    def _safe_line(value, default: int = 1) -> int:
+        """라인 번호를 양의 정수로 정규화."""
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return max(1, default)
+
+    def _resolve_external_checks_dir(self, path_value: str | None) -> str | None:
+        """외부 체크 디렉토리를 workspace 기준 절대 경로로 해석."""
+        raw = str(path_value or "").strip()
+        if not raw:
+            return None
+
+        workspace_path = Path(self.workspace).resolve(strict=False)
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace_path / candidate
+        resolved = candidate.resolve(strict=False)
+
+        if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+            if not (resolved == workspace_path or workspace_path in resolved.parents):
+                logger.warning(
+                    "Ignoring IaC custom checks path outside workspace in GitHub Actions: %s",
+                    raw,
+                )
+                return None
+
+        return str(resolved)

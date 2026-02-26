@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -39,7 +40,9 @@ class ContainerScanner(BaseScanner):
     ):
         super().__init__(workspace)
         self.image = image or os.getenv("INPUT_CONTAINER_IMAGE")
-        self.dockerfile_path = dockerfile_path or os.getenv("INPUT_DOCKERFILE_PATH")
+        self.dockerfile_path = self._resolve_optional_input_path(
+            dockerfile_path or os.getenv("INPUT_DOCKERFILE_PATH")
+        )
 
     @property
     def name(self) -> str:
@@ -62,31 +65,53 @@ class ContainerScanner(BaseScanner):
             report_path = f.name
 
         try:
-            cmd = [
-                "trivy",
-                "--format",
-                "json",
-                "--output",
-                report_path,
-            ]
-
             if self.image:
                 # 이미지 스캔
-                cmd.extend(["image", self.image])
+                cmd = [
+                    "trivy",
+                    "--format",
+                    "json",
+                    "--output",
+                    report_path,
+                    "image",
+                    self.image,
+                ]
                 logger.info(f"Scanning container image: {self.image}")
+                result = self.run_command(cmd, timeout=900)
             elif self.dockerfile_path:
                 # Dockerfile 설정 스캔 (misconfig)
-                cmd.extend(
-                    [
-                        "config",
-                        "--file-patterns",
-                        "Dockerfile",
-                        self.dockerfile_path,
-                    ]
-                )
+                cmd = [
+                    "trivy",
+                    "--format",
+                    "json",
+                    "--output",
+                    report_path,
+                    "config",
+                    "--file-patterns",
+                    "Dockerfile",
+                    self.dockerfile_path,
+                ]
+                fallback_cmd = [
+                    "trivy",
+                    "config",
+                    "--format",
+                    "json",
+                    "--output",
+                    report_path,
+                    self.dockerfile_path,
+                ]
                 logger.info(f"Scanning Dockerfile: {self.dockerfile_path}")
-
-            result = self.run_command(cmd)
+                result = self.run_command(cmd, timeout=900)
+                if result.returncode not in (0, 1) and self._is_file_patterns_compat_error(
+                    result.stderr, result.stdout
+                ):
+                    logger.warning(
+                        "Trivy '--file-patterns' option is not supported by this version. "
+                        "Retrying with compatible arguments."
+                    )
+                    result = self.run_command(fallback_cmd, timeout=900)
+            else:
+                return True, [], None
 
             if result.returncode not in (0, 1):
                 return False, [], f"Trivy container scan failed: {result.stderr}"
@@ -94,7 +119,7 @@ class ContainerScanner(BaseScanner):
             # 결과 파싱
             report_file = Path(report_path)
             if report_file.exists() and report_file.stat().st_size > 0:
-                with open(report_path) as f:
+                with open(report_path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 findings = self._parse_results(data)
@@ -107,6 +132,39 @@ class ContainerScanner(BaseScanner):
             return False, [], str(e)
         finally:
             Path(report_path).unlink(missing_ok=True)
+
+    def _resolve_optional_input_path(self, path_value: str | None) -> str | None:
+        """옵션 경로를 workspace 기준 절대 경로로 해석한다."""
+        raw = str(path_value or "").strip()
+        if not raw:
+            return None
+
+        workspace_path = Path(self.workspace).resolve(strict=False)
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace_path / candidate
+        resolved = candidate.resolve(strict=False)
+
+        if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+            if not (resolved == workspace_path or workspace_path in resolved.parents):
+                logger.warning(
+                    "Ignoring Dockerfile path outside workspace in GitHub Actions: %s",
+                    raw,
+                )
+                return None
+
+        return str(resolved)
+
+    @staticmethod
+    def _is_file_patterns_compat_error(stderr: str | None, stdout: str | None) -> bool:
+        """Trivy 버전 차이로 --file-patterns 옵션이 실패하는지 판단."""
+        text = f"{stderr or ''}\n{stdout or ''}".lower()
+        return "--file-patterns" in text and (
+            "unknown flag" in text
+            or "flag provided but not defined" in text
+            or "unknown shorthand flag" in text
+            or "invalid argument" in text
+        )
 
     def _parse_results(self, data: dict) -> list[Finding]:
         """Trivy 결과 파싱"""
@@ -138,26 +196,54 @@ class ContainerScanner(BaseScanner):
         GitHub SARIF는 유효한 파일 경로 또는 상대 경로를 기대하므로,
         이미지 이름 형식의 경우 Dockerfile로 대체하거나 메타데이터로 저장
         """
-        if not target:
+        raw_target = str(target or "").strip()
+        if not raw_target:
             return "Dockerfile"
 
-        # 파일 경로인 경우 (슬래시로 시작하거나 상대 경로)
-        if "/" in target and ":" not in target.split("/")[0]:
-            return self.normalize_path(target)
+        # 괄호 안의 OS 정보 제거 (예: nginx:latest (debian 12))
+        target_without_os = raw_target.split(" (", 1)[0].strip()
 
-        # 이미지 이름인 경우 (예: nginx:latest, security-action:scan)
-        # 괄호 안의 OS 정보 제거
-        if " (" in target:
-            target = target.split(" (")[0]
+        # 실제 로컬 파일 경로면 파일 경로로 취급
+        if self._looks_like_local_path(target_without_os):
+            return self.normalize_path(target_without_os)
 
         # Dockerfile이 있으면 Dockerfile 사용, 없으면 이미지 이름에서 안전한 경로 생성
         dockerfile = Path(self.workspace) / "Dockerfile"
         if dockerfile.exists():
             return "Dockerfile"
 
-        # 이미지 이름을 안전한 파일명으로 변환 (: -> -, / -> -)
-        safe_name = target.replace(":", "-").replace("/", "-")
+        # 이미지 이름을 안전한 파일명으로 변환
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", target_without_os).strip("-.")
+        if not safe_name:
+            safe_name = "image"
+        safe_name = safe_name[:120]
         return f"container-image/{safe_name}"
+
+    @staticmethod
+    def _is_windows_absolute_path(path: str) -> bool:
+        """Windows 절대경로 여부 확인 (예: C:/repo/file.py)."""
+        normalized = path.replace("\\", "/")
+        return len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/"
+
+    def _looks_like_local_path(self, value: str) -> bool:
+        """컨테이너 타겟 문자열이 로컬 파일 경로인지 추정."""
+        target = str(value or "").strip()
+        if not target:
+            return False
+
+        normalized = target.replace("\\", "/")
+        if normalized.startswith(("/", "./", "../")):
+            return True
+        if self._is_windows_absolute_path(normalized):
+            return True
+
+        candidate = Path(target)
+        if candidate.is_absolute():
+            return True
+
+        # 상대 경로가 workspace 내부 실제 파일로 존재할 때만 파일 경로로 간주
+        workspace_candidate = Path(self.workspace) / candidate
+        return workspace_candidate.exists()
 
     def _convert_vulnerability(self, vuln: dict, target: str) -> Finding:
         """취약점을 Finding으로 변환"""

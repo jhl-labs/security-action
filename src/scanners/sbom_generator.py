@@ -7,6 +7,7 @@ CycloneDX 및 SPDX 포맷 지원
 import json
 import logging
 import os
+import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,17 @@ class SBOMGenerator:
         "spdx-tag-value": "text/spdx",
         "syft-json": "application/json",
     }
+    GH_ACTIONS_SAFE_PATH_PREFIXES = (
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/opt/sonar-scanner/bin",
+        "/root/.cargo/bin",
+        "/usr/local/go/bin",
+        "/root/go/bin",
+    )
 
     def __init__(
         self,
@@ -57,10 +69,84 @@ class SBOMGenerator:
         relative 경로는 workspace 기준으로 처리해 GitHub Actions 컨테이너에서도
         실제 생성 위치와 존재성 검증 위치가 일치하도록 보장한다.
         """
-        output_file = Path(self.output_path)
+        output_file = Path(self.output_path).expanduser()
+        workspace_path = Path(self.workspace).resolve(strict=False)
+
         if output_file.is_absolute():
-            return output_file
-        return Path(self.workspace) / output_file
+            resolved = output_file.resolve(strict=False)
+        else:
+            resolved = (workspace_path / output_file).resolve(strict=False)
+
+        if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+            if not (resolved == workspace_path or workspace_path in resolved.parents):
+                raise ValueError(f"SBOM output path must stay within workspace: {self.output_path}")
+
+        return resolved
+
+    def _format_output_path_for_display(self, resolved_path: Path) -> str:
+        """로그/결과 표시용 출력 경로 문자열."""
+        original = str(self.output_path or "").strip()
+        if original and not Path(original).is_absolute():
+            return original
+
+        workspace_path = Path(self.workspace).resolve(strict=False)
+        if resolved_path == workspace_path or workspace_path in resolved_path.parents:
+            return str(resolved_path.relative_to(workspace_path))
+
+        return str(resolved_path)
+
+    def _build_safe_env(self) -> dict[str, str]:
+        """Syft 실행용 환경 변수 구성.
+
+        PATH에서 빈 항목/`.`/workspace 하위 경로를 제거해
+        저장소 내부 바이너리 하이재킹을 방지한다.
+        """
+        env = os.environ.copy()
+        path_value = env.get("PATH", "")
+        if not path_value:
+            return env
+
+        try:
+            workspace_resolved = Path(self.workspace).resolve(strict=False)
+        except Exception:
+            workspace_resolved = None
+
+        safe_entries: list[str] = []
+        seen: set[str] = set()
+        for raw_entry in path_value.split(os.pathsep):
+            entry = raw_entry.strip()
+            if not entry or entry == ".":
+                continue
+
+            # 상대 경로 PATH 엔트리는 실행 위치 의존적이라 제외한다.
+            if not Path(entry).is_absolute():
+                continue
+
+            if workspace_resolved is not None:
+                try:
+                    entry_path = Path(entry).resolve(strict=False)
+                except Exception:
+                    entry_path = None
+
+                if entry_path is not None and (
+                    entry_path == workspace_resolved or workspace_resolved in entry_path.parents
+                ):
+                    continue
+
+            if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+                if not any(
+                    entry == prefix or entry.startswith(prefix + os.sep)
+                    for prefix in self.GH_ACTIONS_SAFE_PATH_PREFIXES
+                ):
+                    continue
+
+            if entry not in seen:
+                safe_entries.append(entry)
+                seen.add(entry)
+
+        env["PATH"] = os.pathsep.join(safe_entries)
+
+        return env
 
     def generate(self) -> dict[str, Any]:
         """SBOM 생성
@@ -73,8 +159,6 @@ class SBOMGenerator:
             - format: 출력 포맷
             - error: 에러 메시지 (실패 시)
         """
-        import subprocess
-
         logger.info(f"Generating SBOM in {self.output_format} format")
 
         try:
@@ -99,13 +183,17 @@ class SBOMGenerator:
                 ]
             )
 
+            safe_env = self._build_safe_env()
+
             # 실행
-            result = subprocess.run(
+            # Bandit B603: command is list-based with shell=False and sanitized PATH/env.
+            result = subprocess.run(  # nosec B603
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,
                 cwd=self.workspace,
+                env=safe_env,
             )
 
             if result.returncode != 0:
@@ -124,12 +212,13 @@ class SBOMGenerator:
 
             # 구성 요소 수 카운트
             components_count = self._count_components(output_file)
+            display_output_path = self._format_output_path_for_display(output_file)
 
-            logger.info(f"SBOM generated: {self.output_path} ({components_count} components)")
+            logger.info(f"SBOM generated: {display_output_path} ({components_count} components)")
 
             return {
                 "success": True,
-                "output_path": str(self.output_path),
+                "output_path": display_output_path,
                 "components_count": components_count,
                 "format": self.output_format,
                 "mime_type": self.SUPPORTED_FORMATS.get(self.output_format, "application/json"),
@@ -159,7 +248,7 @@ class SBOMGenerator:
     def _count_components(self, sbom_file: Path) -> int:
         """SBOM에서 구성 요소 수 카운트"""
         try:
-            with open(sbom_file) as f:
+            with open(sbom_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             # CycloneDX 포맷
@@ -180,12 +269,16 @@ class SBOMGenerator:
 
     def get_components(self) -> list[dict]:
         """SBOM에서 구성 요소 목록 추출"""
-        sbom_file = self._resolve_output_file()
+        try:
+            sbom_file = self._resolve_output_file()
+        except ValueError:
+            return []
+
         if not sbom_file.exists():
             return []
 
         try:
-            with open(sbom_file) as f:
+            with open(sbom_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             components = []

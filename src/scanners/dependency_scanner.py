@@ -37,7 +37,7 @@ class DependencyScanner(BaseScanner):
                 self.workspace,
             ]
 
-            result = self.run_command(cmd)
+            result = self.run_command(cmd, timeout=900)
 
             if result.returncode != 0:
                 # Trivy fs는 취약점 발견만으로 non-zero를 반환하지 않으므로
@@ -52,7 +52,7 @@ class DependencyScanner(BaseScanner):
             # 결과 파싱
             report_file_path = Path(report_path)
             if report_file_path.exists() and report_file_path.stat().st_size > 0:
-                with open(report_path) as f:
+                with open(report_path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 for result_item in data.get("Results", []):
@@ -66,7 +66,7 @@ class DependencyScanner(BaseScanner):
                             severity=self._map_severity(vuln.get("Severity", "UNKNOWN")),
                             message=self._build_message(vuln),
                             file_path=target,
-                            line_start=0,  # 의존성 파일은 라인 정보 없음
+                            line_start=1,  # 의존성 파일은 정확한 라인 정보가 없어 1로 표기
                             suggestion=self._build_suggestion(vuln),
                             metadata={
                                 "package": vuln.get("PkgName", ""),

@@ -35,8 +35,12 @@ class SecretScanner(BaseScanner):
             if scan_history is not None
             else (os.getenv("INPUT_SECRET_SCAN_HISTORY", "false").lower() == "true")
         )
-        self.baseline_path = baseline_path or os.getenv("INPUT_GITLEAKS_BASELINE")
-        self.config_path = config_path or os.getenv("INPUT_GITLEAKS_CONFIG")
+        self.baseline_path = self._resolve_optional_input_path(
+            baseline_path or os.getenv("INPUT_GITLEAKS_BASELINE")
+        )
+        self.config_path = self._resolve_optional_input_path(
+            config_path or os.getenv("INPUT_GITLEAKS_CONFIG")
+        )
 
     @property
     def name(self) -> str:
@@ -45,6 +49,7 @@ class SecretScanner(BaseScanner):
     def _run_scan(self) -> tuple[bool, list[Finding], str | None]:
         """Gitleaks 스캔 실행"""
         findings: list[Finding] = []
+        scan_timeout = 900 if self.scan_history else 600
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as report_file:
             report_path = report_file.name
@@ -79,7 +84,7 @@ class SecretScanner(BaseScanner):
                 cmd.extend(["--config", self.config_path])
                 logger.info(f"Using config: {self.config_path}")
 
-            result = self.run_command(cmd)
+            result = self.run_command(cmd, timeout=scan_timeout)
 
             # exit code 1은 취약점 발견을 의미
             if result.returncode not in (0, 1):
@@ -88,7 +93,7 @@ class SecretScanner(BaseScanner):
             # 결과 파싱
             report_file_path = Path(report_path)
             if report_file_path.exists() and report_file_path.stat().st_size > 0:
-                with open(report_path) as f:
+                with open(report_path, encoding="utf-8") as f:
                     raw_findings = json.load(f)
 
                 for item in raw_findings:
@@ -114,6 +119,28 @@ class SecretScanner(BaseScanner):
         finally:
             # 임시 파일 정리
             Path(report_path).unlink(missing_ok=True)
+
+    def _resolve_optional_input_path(self, path_value: str | None) -> str | None:
+        """옵션 경로를 workspace 기준 절대 경로로 해석한다."""
+        raw = str(path_value or "").strip()
+        if not raw:
+            return None
+
+        workspace_path = Path(self.workspace).resolve(strict=False)
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace_path / candidate
+        resolved = candidate.resolve(strict=False)
+
+        if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+            if not (resolved == workspace_path or workspace_path in resolved.parents):
+                logger.warning(
+                    "Ignoring Gitleaks path outside workspace in GitHub Actions: %s",
+                    raw,
+                )
+                return None
+
+        return str(resolved)
 
     def _map_severity(self, rule_id: str) -> Severity:
         """규칙 ID에 따른 심각도 매핑"""

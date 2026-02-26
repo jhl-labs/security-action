@@ -64,7 +64,8 @@ class ParallelScanner:
     def _run_scanner(self, task: ScannerTask) -> ScanResult:
         """개별 스캐너 실행"""
         try:
-            scanner = task.scanner_class(self.workspace)
+            scanner_kwargs = task.config or {}
+            scanner = task.scanner_class(self.workspace, **scanner_kwargs)
             return scanner.scan()
         except Exception as e:
             return ScanResult(
@@ -82,9 +83,9 @@ class ParallelScanner:
             console.print(f"[cyan]Running {task.name}...[/cyan]")
             result = self._run_scanner(task)
             results.append(result)
-            status = "✓" if result.success else "✗"
+            status = "[green]✓[/green]" if result.success else "[red]✗[/red]"
             console.print(
-                f"  [{status}] {task.name}: {len(result.findings)} findings ({result.execution_time:.2f}s)"
+                f"  {status} {task.name}: {len(result.findings)} findings ({result.execution_time:.2f}s)"
             )
 
         return results

@@ -39,7 +39,7 @@ class CodeScanner(BaseScanner):
                 self.workspace,
             ]
 
-            result = self.run_command(cmd)
+            result = self.run_command(cmd, timeout=900)
 
             # Semgrep은 발견 시에도 exit 0 반환
             if result.returncode not in (0, 1):
@@ -48,7 +48,7 @@ class CodeScanner(BaseScanner):
             # 결과 파싱
             report_file_path = Path(report_path)
             if report_file_path.exists() and report_file_path.stat().st_size > 0:
-                with open(report_path) as f:
+                with open(report_path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 for item in data.get("results", []):
