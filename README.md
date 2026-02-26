@@ -112,6 +112,8 @@ jobs:
 | `secret-scan-history` | `false` | Git commit history 전체 스캔 (과거 유출 탐지) |
 | `code-scan` | `true` | Semgrep을 사용한 코드 취약점 스캔 활성화 |
 | `dependency-scan` | `true` | Trivy를 사용한 의존성 취약점 스캔 활성화 |
+| `gitleaks-config` | - | Gitleaks 커스텀 설정 파일 경로 |
+| `gitleaks-baseline` | - | Gitleaks baseline 파일 경로 (기존 결과 무시) |
 
 ### 추가 스캐너
 
@@ -119,8 +121,25 @@ jobs:
 |------|--------|------|
 | `container-scan` | `false` | 컨테이너 이미지 취약점 스캔 (Trivy) |
 | `container-image` | - | 스캔할 컨테이너 이미지 (예: `nginx:latest`) |
+| `dockerfile-path` | - | 컨테이너 이미지 대신 스캔할 Dockerfile 경로 |
 | `iac-scan` | `false` | IaC 보안 스캔 (Checkov) |
 | `iac-frameworks` | - | IaC 프레임워크 (예: `terraform,kubernetes`) |
+| `iac-skip-checks` | - | 건너뛸 Checkov 체크 ID 목록 (콤마 구분) |
+| `iac-custom-checks` | - | 커스텀 Checkov 체크 디렉토리 경로 |
+
+- `iac-scan`은 실행 성능/노이즈 관리를 위해 `node_modules`, `vendor`, `.venv`, `dist`, `build` 등 공통 서드파티 디렉토리를 기본 제외합니다.
+- CloudFormation 자동 감지는 단순 확장자(`*.json`)가 아니라 템플릿 시그니처를 함께 확인해 일반 JSON 파일 오탐지를 줄입니다.
+
+### 네이티브 의존성 스캔
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `native-audit` | `false` | 언어별 네이티브 감사 도구 실행 (`npm audit`, `pip-audit`, `govulncheck` 등) |
+| `native-audit-tools` | `auto` | 사용할 도구 목록 (`auto`, `npm`, `pip`, `go`, `cargo`, `bundler`, `composer`) |
+
+- `native-audit-tools: auto`는 프로젝트 파일을 기준으로 도구를 자동 감지합니다.
+- 스캔 성능/노이즈 관리를 위해 `node_modules`, `vendor`, `.venv` 등 공통 서드파티 디렉토리는 기본 제외됩니다.
+- npm 프로젝트에서 `package-lock.json`이 없으면 안전 옵션으로 lock 생성을 시도하며, 생성 실패 시 스캐너를 실패 처리해 미완료 스캔이 성공으로 보이지 않도록 합니다.
 
 ### SBOM 생성
 
@@ -129,6 +148,7 @@ jobs:
 | `sbom-generate` | `false` | SBOM 생성 활성화 (Syft) |
 | `sbom-format` | `cyclonedx-json` | 출력 포맷 (`cyclonedx-json`, `spdx-json`, `syft-json`) |
 | `sbom-output` | `sbom.json` | SBOM 출력 파일 경로 |
+| `sbom-image` | - | 소스 대신 SBOM을 생성할 컨테이너 이미지 |
 
 ### SonarQube 옵션
 
@@ -138,6 +158,10 @@ jobs:
 | `sonar-host-url` | `http://localhost:9000` | SonarQube 서버 URL |
 | `sonar-token` | - | SonarQube 인증 토큰 |
 | `sonar-project-key` | - | SonarQube 프로젝트 키 |
+
+- `sonar-token`을 사용할 때 원격 `http://` SonarQube URL은 보안상 차단됩니다(로컬호스트 예외).
+- `sonar-token`을 사용할 때는 토큰 유출 방지를 위해 `SONAR_HOST_URL`/`sonar-host-url` 값이
+  `sonar-project.properties`의 동일 키보다 우선 적용됩니다.
 
 ### AI Review 옵션
 
@@ -150,17 +174,24 @@ jobs:
 | `openai-base-url` | - | OpenAI 호환 API Base URL |
 | `anthropic-api-key` | - | Anthropic API 키 (대안) |
 
+- AI 리뷰 프롬프트로 전송되는 코드 컨텍스트는 기본적으로 민감 토큰 패턴을 마스킹합니다.
+- Secret 스캐너(Gitleaks) 계열 finding은 원본 코드 대신 안전한 placeholder로 대체해 외부 LLM 전송을 차단합니다.
+
 ### 공통 설정
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
 | `severity-threshold` | `high` | 워크플로우 실패 기준 심각도 |
-| `fail-on-findings` | `true` | 취약점 발견 시 워크플로우 실패 처리 |
+| `fail-on-findings` | `true` | 취약점(임계치 이상) 또는 스캐너 런타임 실패 시 워크플로우 실패 처리 |
 | `sarif-output` | `security-results.sarif` | SARIF 결과 파일 경로 |
+| `json-output` | - | JSON 결과 파일 경로 (선택) |
 | `upload-sarif` | `false` | 생성한 SARIF를 GitHub Security(Code Scanning)에 직접 업로드 |
 | `sarif-category` | `security-action` | SARIF 카테고리(runAutomationDetails.id) |
 | `fail-on-sarif-upload-error` | `false` | SARIF 업로드 실패 시 워크플로우 실패 처리 |
 | `usage-tracking` | `false` | 사용량 로그 출력(외부 전송 없음) |
+| `parallel` | `false` | 스캐너 병렬 실행 |
+| `verbose` | `false` | 상세 로그 출력 |
+| `quiet` | `false` | 최소 로그 출력 (`verbose`보다 우선) |
 | `github-token` | `${{ github.token }}` | GitHub API 토큰 |
 | `config-path` | - | 커스텀 설정 파일 경로 |
 
@@ -173,6 +204,7 @@ jobs:
 | `critical-count` | Critical 심각도 취약점 수 |
 | `high-count` | High 심각도 취약점 수 |
 | `sarif-file` | SARIF 결과 파일 경로 |
+| `json-file` | JSON 결과 파일 경로 |
 | `sarif-upload-id` | GitHub Code Scanning SARIF 업로드 ID |
 | `sbom-file` | SBOM 결과 파일 경로 |
 
@@ -410,6 +442,29 @@ jobs:
 
 Self-hosted/GHES 환경에서 GHAS 수준의 워크플로우를 맞추려면 아래 설정을 권장합니다.
 
+### Private repo에서 GitHub-hosted 사용량을 피하는 방법
+
+이 리포지토리의 기본 워크플로우(`.github/workflows/security-check.yaml`)는
+`SECURITY_ACTION_RUNS_ON_JSON` Repository Variable이 있으면 해당 runner로 실행됩니다.
+
+- 기본값(변수 미설정): `["ubuntu-latest"]`
+- self-hosted 예시: `["self-hosted","linux","jhl-space"]`
+
+즉, private repo에서는 코드 수정 없이 **Repository Variables**에 아래 값만 추가하면 됩니다.
+
+```text
+Name:  SECURITY_ACTION_RUNS_ON_JSON
+Value: ["self-hosted","linux","jhl-space"]
+```
+
+### 사용자가 실행 시 직접 선택하는 방법
+
+`Actions > Security Check > Run workflow`에서 `runs_on_json` 입력값을 넣으면
+해당 실행 1회에 한해 runner를 직접 선택할 수 있습니다.
+
+- 예시(직접 선택): `["self-hosted","linux","jhl-space"]`
+- 빈 값: Repository Variable(`SECURITY_ACTION_RUNS_ON_JSON`) 또는 기본값(`["ubuntu-latest"]`) 사용
+
 ```yaml
 jobs:
   security:
@@ -431,6 +486,8 @@ jobs:
 ```
 
 - `GITHUB_API_URL` 환경이 자동 감지되어 GHES API로 연동됩니다.
+- 토큰(`github-token`) 사용 시 `GITHUB_API_URL`은 `https://`를 권장하며,
+  원격 `http://` 엔드포인트는 보안상 차단됩니다(로컬호스트 예외).
 - 외부 텔레메트리 스크립트 실행 없이 동작합니다.
 
 ## 추가 시나리오
