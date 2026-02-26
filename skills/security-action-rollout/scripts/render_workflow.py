@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-
 BOOL_MAP = {
     "1": True,
     "true": True,
@@ -19,6 +18,9 @@ BOOL_MAP = {
     "n": False,
     "off": False,
 }
+
+SUPPORTED_EVENTS = {"pull_request", "push", "workflow_dispatch", "schedule"}
+SUPPORTED_SEVERITY_THRESHOLDS = {"critical", "high", "medium", "low", "info"}
 
 
 def parse_bool(value: str) -> bool:
@@ -33,6 +35,8 @@ def parse_csv(value: str) -> list[str]:
 
 
 def format_runs_on(labels: list[str]) -> list[str]:
+    if not labels:
+        raise ValueError("runs-on labels must not be empty")
     if len(labels) == 1:
         return [f"    runs-on: {labels[0]}"]
 
@@ -73,14 +77,17 @@ def build_events(
     return lines
 
 
-def build_permissions(upload_sarif: bool) -> list[str]:
+def build_permissions(upload_sarif: bool, events: list[str]) -> list[str]:
     lines = [
         "    permissions:",
         "      contents: read",
         "      checks: write",
         "      statuses: write",
-        "      pull-requests: write",
     ]
+
+    event_set = {event.lower() for event in events}
+    if "pull_request" in event_set:
+        lines.append("      pull-requests: write")
 
     if upload_sarif:
         lines.append("      security-events: write")
@@ -89,6 +96,13 @@ def build_permissions(upload_sarif: bool) -> list[str]:
 
 
 def build_with_block(args: argparse.Namespace) -> list[str]:
+    severity_threshold = str(args.severity_threshold or "").strip().lower()
+    if severity_threshold not in SUPPORTED_SEVERITY_THRESHOLDS:
+        raise ValueError(
+            "Unsupported severity-threshold: "
+            f"{args.severity_threshold}. Supported values: critical, high, medium, low, info"
+        )
+
     fail_on_findings = "true" if args.mode == "gate" else "false"
     upload_sarif = "true" if args.upload_sarif else "false"
     parallel = "true" if args.parallel else "false"
@@ -102,7 +116,7 @@ def build_with_block(args: argparse.Namespace) -> list[str]:
         "          code-scan: 'true'",
         "          dependency-scan: 'true'",
         f"          native-audit: '{native_audit}'",
-        f"          severity-threshold: '{args.severity_threshold}'",
+        f"          severity-threshold: '{severity_threshold}'",
         f"          fail-on-findings: '{fail_on_findings}'",
         f"          upload-sarif: '{upload_sarif}'",
         f"          sarif-category: '{args.sarif_category}'",
@@ -151,10 +165,23 @@ def build_workflow(args: argparse.Namespace) -> str:
     events = parse_csv(args.events)
     if not events:
         raise ValueError("At least one event is required")
+    normalized_events = [event.lower() for event in events]
+    unknown_events = [event for event in normalized_events if event not in SUPPORTED_EVENTS]
+    if unknown_events:
+        raise ValueError(
+            "Unsupported event(s): "
+            + ", ".join(sorted(set(unknown_events)))
+            + ". Supported events: pull_request, push, workflow_dispatch, schedule"
+        )
+    runs_on_labels = parse_csv(args.runs_on)
+    if not runs_on_labels:
+        raise ValueError("runs-on must not be empty")
 
     pr_types = parse_csv(args.pr_types)
-    if "pull_request" in {event.lower() for event in events} and not pr_types:
+    if "pull_request" in set(normalized_events) and not pr_types:
         raise ValueError("pr-types must not be empty when pull_request is enabled")
+    if "schedule" in set(normalized_events) and not (args.schedule_cron or "").strip():
+        raise ValueError("schedule-cron must be set when schedule event is enabled")
 
     lines: list[str] = [f"name: {args.workflow_name}", ""]
     lines.extend(build_events(events, args.target_branch, pr_types, args.schedule_cron))
@@ -165,8 +192,8 @@ def build_workflow(args: argparse.Namespace) -> str:
             f"  {args.job_name}:",
         ]
     )
-    lines.extend(format_runs_on(parse_csv(args.runs_on)))
-    lines.extend(build_permissions(args.upload_sarif))
+    lines.extend(format_runs_on(runs_on_labels))
+    lines.extend(build_permissions(args.upload_sarif, events))
     lines.extend(
         [
             "    steps:",
