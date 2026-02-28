@@ -1,0 +1,22 @@
+.git
+.github
+.agents
+.claude
+.gemini
+.roo
+.pytest_cache
+.ruff_cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Test and local-only assets are not needed for runtime image build
+tests/
+skills/
+scripts/
+
+# Local artifacts
+security-results.sarif
+*.sbom.json

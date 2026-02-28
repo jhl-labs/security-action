@@ -25,6 +25,7 @@ jobs:
   security-scan:
     name: 🛡️ Security Scan
     runs-on: jhl-space
+    timeout-minutes: 25
     permissions:
       contents: read
       pull-requests: write
@@ -101,7 +102,10 @@ jobs:
 
   container-scan:
     name: 🛡️ Container Scan
+    # self-hosted container image scan은 무거운 작업이므로 주기/수동 실행으로 안정화
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: jhl-space
+    timeout-minutes: 40
     permissions:
       contents: read
       checks: write
@@ -121,8 +125,9 @@ jobs:
           push: false
           load: true
           tags: security-action:self-hosted-scan
+          provenance: false
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Run Container Scan
         id: scan
@@ -173,6 +178,7 @@ jobs:
   lint:
     name: 🔧 Lint
     runs-on: jhl-space
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -195,6 +201,7 @@ jobs:
   report:
     name: 📊 Report
     runs-on: jhl-space
+    timeout-minutes: 5
     needs: [security-scan, container-scan, lint]
     if: always()
 
