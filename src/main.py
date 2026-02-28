@@ -153,7 +153,7 @@ class Config:
     # AI 리뷰
     ai_review: bool = False
     # 공통
-    check_name: str = "🛡️ Security Report"
+    check_name: str = "Security scan results"
     skip_check: bool = False
     scanner_checks: bool = False  # 개별 스캐너 Check Run 생성 여부
     post_summary: bool = True  # Job Summary 생성 여부
@@ -234,7 +234,7 @@ class Config:
             # AI 리뷰
             ai_review=str_to_bool(os.getenv("INPUT_AI_REVIEW", "false")),
             # 공통
-            check_name=os.getenv("INPUT_CHECK_NAME", "🛡️ Security Report"),
+            check_name=os.getenv("INPUT_CHECK_NAME", "Security scan results"),
             skip_check=str_to_bool(os.getenv("INPUT_SKIP_CHECK", "false")),
             scanner_checks=str_to_bool(os.getenv("INPUT_SCANNER_CHECKS", "false")),
             post_summary=str_to_bool(os.getenv("INPUT_POST_SUMMARY", "true")),
@@ -269,8 +269,16 @@ def set_github_output(name: str, value: str) -> None:
     while delimiter in value_str:
         delimiter += "_X"
 
-    with open(github_output, "a", encoding="utf-8") as f:
-        f.write(f"{name}<<{delimiter}\n{value_str}\n{delimiter}\n")
+    try:
+        with open(github_output, "a", encoding="utf-8") as f:
+            f.write(f"{name}<<{delimiter}\n{value_str}\n{delimiter}\n")
+    except OSError as exc:
+        logger.warning(
+            "Failed to write GitHub output %s to %s: %s",
+            name,
+            github_output,
+            exc,
+        )
 
 
 def _escape_workflow_command_data(value: str) -> str:
@@ -1495,8 +1503,58 @@ def _is_within_workspace(path: Path, workspace_path: Path) -> bool:
     return False
 
 
+def _is_untrusted_pull_request_context() -> bool:
+    """포크 PR 등 신뢰할 수 없는 GitHub Actions 컨텍스트인지 판별한다.
+
+    저장소 내 YAML 설정으로 외부 서비스 URL/프로젝트 키를 덮어써
+    secret 토큰 전송 대상을 바꾸는 위험을 줄이기 위해 사용한다.
+    """
+    if os.getenv("GITHUB_ACTIONS", "").lower() != "true":
+        return False
+
+    event_name = (os.getenv("GITHUB_EVENT_NAME") or "").strip().lower()
+    if event_name not in {"pull_request", "pull_request_target"}:
+        return False
+
+    event_path = (os.getenv("GITHUB_EVENT_PATH") or "").strip()
+    if not event_path:
+        # 컨텍스트를 판별할 수 없으면 보수적으로 차단한다.
+        return True
+
+    try:
+        with open(event_path, encoding="utf-8") as f:
+            event_payload = json.load(f)
+    except Exception as e:
+        logger.warning(
+            "Failed to parse GITHUB_EVENT_PATH for trust decision (%s): %s",
+            event_path,
+            e,
+        )
+        return True
+
+    pull_request = event_payload.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return True
+
+    head_repo = pull_request.get("head", {}).get("repo", {})
+    base_repo = pull_request.get("base", {}).get("repo", {})
+
+    if isinstance(head_repo, dict) and bool(head_repo.get("fork")):
+        return True
+
+    if isinstance(head_repo, dict) and isinstance(base_repo, dict):
+        head_full_name = str(head_repo.get("full_name", "")).strip().lower()
+        base_full_name = str(base_repo.get("full_name", "")).strip().lower()
+        if head_full_name and base_full_name and head_full_name != base_full_name:
+            return True
+
+    return False
+
+
 def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: str) -> None:
     """YAML 설정을 런타임 Config에 반영."""
+    _warn_unsupported_yaml_runtime_options(yaml_config)
+
     if _is_explicit_nested_field(yaml_config, "gitleaks", "enabled"):
         config.secret_scan = bool(yaml_config.gitleaks.enabled)
     if _is_explicit_nested_field(yaml_config, "semgrep", "enabled"):
@@ -1545,14 +1603,25 @@ def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: st
         if gitleaks_baseline_path:
             os.environ["INPUT_GITLEAKS_BASELINE"] = gitleaks_baseline_path
 
+    allow_sonar_repo_overrides = not _is_untrusted_pull_request_context()
     if _is_explicit_nested_field(yaml_config, "sonarqube", "host_url"):
         host_url = str(yaml_config.sonarqube.host_url or "").strip()
         if host_url:
-            os.environ["SONAR_HOST_URL"] = host_url
+            if allow_sonar_repo_overrides:
+                os.environ["SONAR_HOST_URL"] = host_url
+            else:
+                logger.warning(
+                    "Ignoring sonarqube.host_url from repository YAML in untrusted PR context"
+                )
     if _is_explicit_nested_field(yaml_config, "sonarqube", "project_key"):
         project_key = str(yaml_config.sonarqube.project_key or "").strip()
         if project_key:
-            os.environ["SONAR_PROJECT_KEY"] = project_key
+            if allow_sonar_repo_overrides:
+                os.environ["SONAR_PROJECT_KEY"] = project_key
+            else:
+                logger.warning(
+                    "Ignoring sonarqube.project_key from repository YAML in untrusted PR context"
+                )
 
     if _is_explicit_nested_field(yaml_config, "ai_review", "enabled"):
         os.environ["INPUT_AI_REVIEW"] = str(config.ai_review).lower()
@@ -1563,6 +1632,41 @@ def apply_yaml_runtime_overrides(config: Config, yaml_config: Any, workspace: st
         os.environ["INPUT_AI_PROVIDER"] = str(yaml_config.ai_review.provider)
     if _is_explicit_nested_field(yaml_config, "ai_review", "model") and yaml_config.ai_review.model:
         os.environ["INPUT_AI_MODEL"] = str(yaml_config.ai_review.model)
+
+
+def _warn_unsupported_yaml_runtime_options(yaml_config: Any) -> None:
+    """런타임에 적용되지 않는 YAML 옵션이 명시되면 경고한다."""
+    supported_fields = {
+        "gitleaks": {"enabled", "config_path", "baseline_path"},
+        "semgrep": {"enabled"},
+        "trivy": {"enabled"},
+        "sonarqube": {"enabled", "host_url", "project_key"},
+        "ai_review": {"enabled", "provider", "model"},
+        "reporting": {"sarif_output", "json_output", "fail_on_findings", "fail_on_severity"},
+    }
+
+    root_fields_set = getattr(yaml_config, "model_fields_set", None)
+
+    for section_name, allowed in supported_fields.items():
+        if root_fields_set is not None and section_name not in root_fields_set:
+            continue
+
+        section = getattr(yaml_config, section_name, None)
+        if section is None:
+            continue
+
+        section_fields_set = getattr(section, "model_fields_set", None)
+        if section_fields_set is None:
+            continue
+
+        unsupported = sorted(field for field in section_fields_set if field not in allowed)
+        if unsupported:
+            unsupported_keys = ", ".join(f"{section_name}.{field}" for field in unsupported)
+            logger.warning(
+                "The following YAML option(s) are currently not applied at runtime and will be "
+                "ignored: %s",
+                unsupported_keys,
+            )
 
 
 def apply_global_excludes(
@@ -1657,6 +1761,17 @@ def main() -> int:
     # 런타임 workspace를 환경 변수에 보장한다.
     os.environ["GITHUB_WORKSPACE"] = workspace
     yaml_config, yaml_config_path = load_yaml_runtime_config(config, workspace)
+    if yaml_config and _is_untrusted_pull_request_context():
+        console.print(
+            "[yellow]⚠[/yellow] Untrusted pull request context detected; "
+            "ignoring repository YAML overrides for security."
+        )
+        logger.warning(
+            "Ignoring YAML runtime config in untrusted pull request context: %s",
+            yaml_config_path,
+        )
+        yaml_config = None
+
     if yaml_config:
         apply_yaml_runtime_overrides(config, yaml_config, workspace)
         console.print(f"[dim]YAML config loaded: {yaml_config_path}[/dim]")

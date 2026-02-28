@@ -48,6 +48,14 @@ def test_config_from_env_sarif_defaults(monkeypatch):
     assert cfg.sarif_category == "security-action"
 
 
+def test_config_from_env_uses_required_check_name_default(monkeypatch):
+    monkeypatch.delenv("INPUT_CHECK_NAME", raising=False)
+
+    cfg = Config.from_env()
+
+    assert cfg.check_name == "Security scan results"
+
+
 def test_config_from_env_falls_back_to_global_ai_env(monkeypatch):
     monkeypatch.delenv("INPUT_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("INPUT_ANTHROPIC_API_KEY", raising=False)
@@ -182,6 +190,18 @@ def test_set_github_output_skips_when_output_path_missing(monkeypatch, capsys):
     assert captured.err == ""
 
 
+def test_set_github_output_handles_oserror(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output.txt"))
+
+    def fake_open(*args, **kwargs):  # noqa: ARG001
+        raise OSError("too many open files")
+
+    monkeypatch.setattr(main_module, "open", fake_open, raising=False)
+
+    # 예외를 전파하지 않아야 한다.
+    main_module.set_github_output("demo", "value")
+
+
 def test_set_findings_count_outputs_uses_filtered_findings(monkeypatch):
     captured = {}
 
@@ -257,6 +277,130 @@ def test_apply_yaml_runtime_overrides_updates_config(tmp_path, monkeypatch):
     assert fake_env["INPUT_AI_MODEL"] == "gpt-4o-mini"
     assert fake_env["INPUT_GITLEAKS_CONFIG"] == str(tmp_path / "configs/gitleaks.toml")
     assert fake_env["INPUT_GITLEAKS_BASELINE"] == str(tmp_path / ".security-baseline.json")
+
+
+def test_apply_yaml_runtime_overrides_blocks_sonar_repo_overrides_for_untrusted_pr(
+    tmp_path, monkeypatch
+):
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "head": {
+                        "repo": {
+                            "fork": True,
+                            "full_name": "attacker/forked-repo",
+                        }
+                    },
+                    "base": {
+                        "repo": {
+                            "full_name": "trusted-org/security-action",
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_env = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request_target",
+        "GITHUB_EVENT_PATH": str(event_path),
+    }
+    monkeypatch.setattr(main_module.os, "environ", fake_env)
+
+    cfg = _base_config()
+    yaml_config = SimpleNamespace(
+        gitleaks=SimpleNamespace(
+            enabled=True,
+            config_path=None,
+            baseline_path=None,
+        ),
+        semgrep=SimpleNamespace(enabled=True),
+        trivy=SimpleNamespace(enabled=True),
+        sonarqube=SimpleNamespace(
+            enabled=True,
+            host_url="https://attacker-sonar.example.com",
+            project_key="attacker_project",
+        ),
+        ai_review=SimpleNamespace(enabled=False, provider=None, model=None),
+        reporting=SimpleNamespace(
+            sarif_output="security-results.sarif",
+            json_output=None,
+            fail_on_findings=True,
+            fail_on_severity="high",
+        ),
+    )
+
+    main_module.apply_yaml_runtime_overrides(cfg, yaml_config, str(tmp_path))
+
+    assert cfg.sonar_scan is True
+    assert "SONAR_HOST_URL" not in fake_env
+    assert "SONAR_PROJECT_KEY" not in fake_env
+
+
+def test_apply_yaml_runtime_overrides_warns_for_unsupported_runtime_options(tmp_path, caplog):
+    from config.loader import load_config
+
+    config_file = tmp_path / ".security-action.yml"
+    config_file.write_text(
+        """
+version: "1.0"
+gitleaks:
+  enabled: true
+  redact: false
+semgrep:
+  enabled: true
+  rulesets:
+    - auto
+trivy:
+  enabled: true
+  ignore_unfixed: true
+reporting:
+  sarif_output: custom.sarif
+  github_comment: false
+""".strip()
+    )
+
+    cfg = _base_config()
+    yaml_cfg = load_config(str(config_file), str(tmp_path))
+
+    with caplog.at_level(logging.WARNING):
+        main_module.apply_yaml_runtime_overrides(cfg, yaml_cfg, str(tmp_path))
+
+    warning_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "gitleaks.redact" in warning_text
+    assert "semgrep.rulesets" in warning_text
+    assert "trivy.ignore_unfixed" in warning_text
+    assert "reporting.github_comment" in warning_text
+
+
+def test_apply_yaml_runtime_overrides_blocks_sonar_overrides_when_event_context_missing(
+    tmp_path, monkeypatch
+):
+    fake_env = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        # GITHUB_EVENT_PATH intentionally omitted
+    }
+    monkeypatch.setattr(main_module.os, "environ", fake_env)
+
+    cfg = _base_config()
+    yaml_config = SimpleNamespace(
+        sonarqube=SimpleNamespace(
+            enabled=True,
+            host_url="https://attacker-sonar.example.com",
+            project_key="attacker_project",
+        ),
+    )
+
+    main_module.apply_yaml_runtime_overrides(cfg, yaml_config, str(tmp_path))
+
+    assert cfg.sonar_scan is True
+    assert "SONAR_HOST_URL" not in fake_env
+    assert "SONAR_PROJECT_KEY" not in fake_env
 
 
 def test_apply_yaml_runtime_overrides_ignores_yaml_defaults_when_not_explicit(tmp_path):
@@ -1414,6 +1558,92 @@ def test_main_ai_review_receives_filtered_findings(monkeypatch):
 
     assert exit_code == 0
     assert captured["prefiltered_findings"] == []
+
+
+def test_main_ignores_yaml_overrides_in_untrusted_pr_context(monkeypatch, tmp_path):
+    cfg = _base_config()
+    cfg.fail_on_findings = True
+    cfg.ai_review = False
+    cfg.github_token = None
+
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "head": {
+                        "repo": {
+                            "fork": True,
+                            "full_name": "attacker/forked-repo",
+                        }
+                    },
+                    "base": {
+                        "repo": {
+                            "full_name": "trusted-org/security-action",
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    finding_obj = main_module.Finding(
+        scanner="Semgrep",
+        rule_id="SG-HIGH",
+        severity=main_module.Severity.HIGH,
+        message="high severity issue",
+        file_path="src/app.py",
+        line_start=10,
+    )
+    scan_result = main_module.ScanResult(
+        scanner="Semgrep",
+        success=True,
+        findings=[finding_obj],
+        execution_time=0.1,
+    )
+
+    # 해당 YAML이 적용되면 finding이 억제돼 성공해야 하지만,
+    # untrusted PR에서는 YAML을 무시해야 한다.
+    yaml_cfg = SimpleNamespace(
+        global_excludes=["**/src/**"],
+        false_positives=[],
+    )
+
+    captured: dict[str, list[dict]] = {}
+
+    def fake_generate_reports(
+        results, all_findings, config, ai_review_result=None, github_reporter=None, **kwargs
+    ):  # noqa: ANN001, ANN202, ARG001
+        captured["all_findings"] = list(all_findings)
+        return False
+
+    monkeypatch.setattr(main_module, "print_banner", lambda: None)
+    monkeypatch.setattr(main_module, "print_scan_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "print_findings_detail", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "print_workflow_annotations", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main_module, "print_scanner_runtime_error_annotations", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(main_module, "set_github_output", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "run_scanners", lambda *args, **kwargs: [scan_result])
+    monkeypatch.setattr(main_module, "generate_reports", fake_generate_reports)
+    monkeypatch.setattr(
+        main_module,
+        "load_yaml_runtime_config",
+        lambda *args, **kwargs: (yaml_cfg, "mock.yml"),
+    )
+    monkeypatch.setattr(main_module.Config, "from_env", classmethod(lambda cls: cfg))
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request_target")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+
+    exit_code = main_module.main()
+
+    assert exit_code == 1
+    assert len(captured["all_findings"]) == 1
+    assert captured["all_findings"][0]["rule_id"] == "SG-HIGH"
 
 
 def test_main_sets_github_workspace_when_missing(monkeypatch, tmp_path):
