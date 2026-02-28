@@ -39,6 +39,11 @@ class NativeAuditScanner(BaseScanner):
         "vendor",
         "dist",
         "build",
+        # 테스트 fixture/testdata는 실제 배포 의존성이 아닌 샘플 데이터인 경우가 많아
+        # 네이티브 감사 시 과도한 설치/리소스 사용을 유발할 수 있으므로 기본 제외한다.
+        "fixtures",
+        "__fixtures__",
+        "testdata",
     }
 
     # 지원하는 패키지 관리자와 관련 파일

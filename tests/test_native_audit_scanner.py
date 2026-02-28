@@ -222,6 +222,18 @@ def test_detect_package_managers_ignores_vendor_like_directories(tmp_path):
     assert detected == []
 
 
+def test_detect_package_managers_ignores_fixture_directories(tmp_path):
+    fixture_dir = tmp_path / "tests" / "fixtures" / "sample"
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "package.json").write_text("{}", encoding="utf-8")
+    (fixture_dir / "requirements.txt").write_text("requests==2.25.0\n", encoding="utf-8")
+
+    scanner = NativeAuditScanner(str(tmp_path), tools=["auto"])
+
+    detected = scanner._detect_package_managers()
+    assert detected == []
+
+
 def test_run_npm_audit_skips_node_modules_nested_package_json(tmp_path, monkeypatch):
     app_dir = tmp_path / "app"
     app_dir.mkdir(parents=True)
