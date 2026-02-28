@@ -181,6 +181,10 @@ jobs:
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
+| `check-name` | `Security scan results` | Required Status Check 이름 |
+| `skip-check` | `false` | Required Status Check 생성 생략 |
+| `scanner-checks` | `false` | 스캐너별 개별 Check Run 생성 |
+| `post-summary` | `true` | GitHub Job Summary 생성 |
 | `severity-threshold` | `high` | 워크플로우 실패 기준 심각도 |
 | `fail-on-findings` | `true` | 취약점(임계치 이상) 또는 스캐너 런타임 실패 시 워크플로우 실패 처리 |
 | `sarif-output` | `security-results.sarif` | SARIF 결과 파일 경로 |
@@ -328,40 +332,35 @@ version: "1.0"
 # Gitleaks 설정
 gitleaks:
   enabled: true
-  severity_threshold: low
-  exclude_patterns:
-    - "**/test*/**"
-    - "**/testdata/**"
+  config_path: .gitleaks.toml
+  baseline_path: .security-baseline.json
 
 # Semgrep 설정
 semgrep:
   enabled: true
-  severity_threshold: medium
-  rulesets:
-    - auto
-    - p/security-audit
-    - p/owasp-top-ten
-  exclude_rules:
-    - "generic.secrets.security.detected-generic-secret"
 
 # Trivy 설정
 trivy:
   enabled: true
-  severity_threshold: medium
-  ignore_unfixed: false
 
 # SonarQube 설정
 sonarqube:
   enabled: false
-  host_url: http://localhost:9000
-  quality_gate_wait: false
+  host_url: https://sonar.example.com
+  project_key: my-project-key
 
 # AI 리뷰 설정
 ai_review:
   enabled: false
   provider: openai
   model: gpt-4o
-  max_findings: 20
+
+# 리포팅 설정
+reporting:
+  sarif_output: security-results.sarif
+  json_output: security-results.json
+  fail_on_severity: high
+  fail_on_findings: true
 
 # 오탐(False Positive) 관리
 false_positives:
@@ -391,6 +390,11 @@ global_excludes:
     config-path: '.security-action.yml'
     github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
+
+- 보안상, GitHub Actions의 **fork 기반 `pull_request` / `pull_request_target`** 컨텍스트에서는
+  PR이 변경한 저장소 YAML 오버라이드(`.security-action.yml`)를 적용하지 않습니다.
+  (스캐너 비활성화/임계치 완화/오탐 규칙 주입 같은 우회 방지)
+- 런타임에서 아직 지원하지 않는 YAML 옵션은 경고 로그를 남기고 무시됩니다.
 
 ## GitHub Security 탭 연동
 

@@ -123,9 +123,9 @@ inputs:
 
   # 공통 설정
   check-name:
-    description: 'Required Status Check 이름 (기본: 🛡️ Security Report)'
+    description: 'Required Status Check 이름 (기본: Security scan results)'
     required: false
-    default: '🛡️ Security Report'
+    default: 'Security scan results'
   skip-check:
     description: 'Required Status Check 생성 건너뛰기 (개별 스캐너 체크만 생성)'
     required: false

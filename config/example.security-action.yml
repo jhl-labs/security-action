@@ -6,73 +6,33 @@ version: "1.0"
 # Gitleaks (비밀값 스캐닝) 설정
 gitleaks:
   enabled: true
-  severity_threshold: low
   config_path: null  # 커스텀 gitleaks.toml 경로
   baseline_path: null  # 베이스라인 파일 (이전 결과 비교용)
-  redact: true  # 출력에서 비밀값 마스킹
-  exclude_patterns:
-    - "**/*_test.go"
-    - "**/testdata/**"
 
 # Semgrep (코드 스캐닝) 설정
 semgrep:
   enabled: true
-  severity_threshold: medium
-  rulesets:
-    - auto  # 자동 언어 감지
-    - p/security-audit  # 보안 감사 규칙
-    - p/owasp-top-ten  # OWASP Top 10
-    # - p/r2c-security-audit  # 추가 보안 규칙
-  custom_rules_dir: null  # 커스텀 규칙 디렉토리
-  exclude_rules:
-    - "generic.secrets.security.detected-generic-secret.detected-generic-secret"
-  max_target_bytes: 1000000
-  exclude_patterns:
-    - "**/node_modules/**"
-    - "**/vendor/**"
 
 # Trivy (의존성 스캐닝) 설정
 trivy:
   enabled: true
-  severity_threshold: medium
-  vuln_type:
-    - os
-    - library
-  ignore_unfixed: false  # 수정되지 않은 취약점 무시
-  ignorefile_path: null  # .trivyignore 경로
 
 # SonarQube (코드 품질 및 보안 분석) 설정
 sonarqube:
   enabled: false
   host_url: http://localhost:9000  # SonarQube 서버 URL
-  token: null  # SonarQube 인증 토큰 (환경변수 SONAR_TOKEN 권장)
   project_key: null  # 프로젝트 키 (미설정 시 자동 생성)
-  organization: null  # SonarCloud 사용 시 조직 키
-  use_cloud: false  # SonarCloud 사용 여부
-  quality_gate_wait: false  # Quality Gate 결과 대기
-  exclusions:
-    - "**/node_modules/**"
-    - "**/vendor/**"
-    - "**/test/**"
-    - "**/tests/**"
 
 # AI 리뷰 설정
 ai_review:
   enabled: false
   provider: openai  # openai 또는 anthropic
   model: gpt-4o
-  max_findings: 20  # 리뷰할 최대 취약점 수
-  temperature: 0.1
-  include_code_context: true
-  context_lines: 10
 
 # 리포팅 설정
 reporting:
   sarif_output: security-results.sarif
   json_output: null  # security-results.json
-  html_output: null  # security-report.html
-  github_comment: true
-  github_check_run: true
   fail_on_severity: high  # critical, high, medium, low
   fail_on_findings: true
 
