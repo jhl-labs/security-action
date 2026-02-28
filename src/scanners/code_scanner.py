@@ -43,7 +43,16 @@ class CodeScanner(BaseScanner):
 
             # Semgrep은 발견 시에도 exit 0 반환
             if result.returncode not in (0, 1):
-                return False, [], f"Semgrep failed: {result.stderr}"
+                error_output = (result.stderr or result.stdout or "").strip()
+                if not error_output:
+                    error_output = "no output"
+                if len(error_output) > 500:
+                    error_output = error_output[:500] + "..."
+                return (
+                    False,
+                    [],
+                    f"Semgrep failed (exit code {result.returncode}): {error_output}",
+                )
 
             # 결과 파싱
             report_file_path = Path(report_path)
